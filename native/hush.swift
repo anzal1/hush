@@ -3,7 +3,7 @@
 //   hush daemon <socket>          run the player; one line commands arrive on the socket
 //   hush ctl <socket> <command>   send one command, print the JSON reply
 //
-// Commands: play <url> <name...> | pause | resume | stop | vol <0-100>
+// Commands: play <url> <name...> | pause | resume | stop | vol <0-100> | seek <seconds>
 //           duck <id> | unduck <id> | status | quit
 //
 // It streams with the system AVPlayer, so it needs no other software. It exits by
@@ -77,6 +77,8 @@ final class Hush: NSObject, AVPlayerItemMetadataOutputPushDelegate {
     var gain: Float = 0
     var isPaused = false
     var lastContact = Date()
+    var ended = false
+    var endObserver: NSObjectProtocol?
 
     func play(url: String, name: String) {
         guard let u = URL(string: url) else { return }
@@ -85,8 +87,11 @@ final class Hush: NSObject, AVPlayerItemMetadataOutputPushDelegate {
         station = name
         self.url = url
         isPaused = false
+        ended = false
         gain = 0
         let it = AVPlayerItem(url: u)
+        if let o = endObserver { NotificationCenter.default.removeObserver(o) }
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: it, queue: .main) { [weak self] _ in self?.ended = true }
         let out = AVPlayerItemMetadataOutput(identifiers: nil)
         out.setDelegate(self, queue: .main)
         it.add(out)
@@ -121,13 +126,27 @@ final class Hush: NSObject, AVPlayerItemMetadataOutputPushDelegate {
     func state() -> String {
         guard let p = player, let it = item else { return "idle" }
         if it.status == .failed { return "failed" }
+        if ended { return "ended" }
         if isPaused { return "paused" }
         return p.timeControlStatus == .playing ? "playing" : "loading"
     }
 
+    func position() -> Int {
+        guard let p = player else { return 0 }
+        let t = CMTimeGetSeconds(p.currentTime())
+        return t.isFinite && t > 0 ? Int(t) : 0
+    }
+
+    func duration() -> Int {
+        guard let it = item else { return 0 }
+        let t = CMTimeGetSeconds(it.duration)
+        return t.isFinite && t > 0 ? Int(t) : 0
+    }
+
     func statusJSON() -> String {
         "{\"state\":\(jsonString(state())),\"station\":\(jsonString(station)),\"title\":\(jsonString(title)),"
-            + "\"volume\":\(Int((base * 100).rounded())),\"ducked\":\(!ducked.isEmpty)}"
+            + "\"volume\":\(Int((base * 100).rounded())),\"ducked\":\(!ducked.isEmpty),"
+            + "\"pos\":\(position()),\"dur\":\(duration())}"
     }
 
     func handle(_ line: String) -> String {
@@ -148,6 +167,8 @@ final class Hush: NSObject, AVPlayerItemMetadataOutputPushDelegate {
             item = nil
             title = ""
             station = ""
+        case "seek":
+            if parts.count >= 2, let v = Double(parts[1]) { player?.seek(to: CMTime(seconds: v, preferredTimescale: 600)) }
         case "vol":
             if parts.count >= 2, let v = Float(parts[1]) { base = max(0, min(100, v)) / 100 }
         case "duck":

@@ -1,6 +1,6 @@
 # Hush
 
-Free internet radio in one quiet line above the Claude Code prompt. When Claude asks you a
+Free internet radio and any song, in one quiet line above the Claude Code prompt, with a small DJ Clawd who listens along. When Claude asks you a
 question the music steps down, and it comes back when you answer.
 
 - Free: no account, no key. Streams are public stations from the open Radio Browser directory.
@@ -13,6 +13,8 @@ question the music steps down, and it comes back when you answer.
     /music next       next station (lofi, jazz, chill, classical, nature)
     /music vol 40
     /music stop
+    /music frank ocean nights     play any song or artist
+    /music clawd                  show or hide DJ Clawd
 
 Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station, `j` `k` volume, `esc` back.
 
@@ -41,3 +43,18 @@ SomaFM is left out on purpose because its terms prohibit third-party clients.
 These are public streams found through the Radio Browser directory. The stations have not agreed to be
 in Hush, so use it as you would any radio app, for personal listening. To change the list, edit
 `STATIONS` at the top of `hooks/register.mjs`.
+
+## Any song
+
+`/music <song or artist>` finds the song on YouTube and plays it in full, then the next few results.
+The first time, Hush downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp) (about 35 MB) into
+`~/.claude/hush/`. It updates itself when YouTube changes. Nothing else to install.
+
+Streaming YouTube audio outside YouTube's own player is against YouTube's terms of service. The radio
+stations do not use it. Use songs at your own discretion, for personal listening.
+
+## DJ Clawd
+
+A tiny headphone-wearing Clawd sits at the right of the row while music plays. He walks in when a song
+starts, nods on tool calls, and lifts one headphone cup when Claude asks you a question (the music steps
+down at the same moment). He needs about 84 columns, and `/music clawd` turns him off.
