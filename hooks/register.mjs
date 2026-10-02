@@ -1,20 +1,23 @@
 // Hush: free radio and any song, in one quiet line above the prompt, with a small
 // DJ Clawd who listens along.
 //
-// Audio comes from bin/hush, a small native helper that streams with the system
-// AVPlayer and listens on a unix socket. This file only talks to it. Songs are
-// found with yt-dlp, which Hush downloads once, the first time you ask for a song.
+// Radio comes from bin/hush, a small native helper that streams with the system
+// AVPlayer and listens on a unix socket. Songs come from hum, a free player that plays
+// through YouTube's own embed in a window you can see. Hush starts hum when it is not
+// running and talks to its loopback remote over HTTP. hooks/logic.mjs holds the pure parts.
 //
 //   /music                     start the last station, or pause and resume
-//   /music <song or artist>    play it: /music frank ocean nights
+//   /music <song or artist>    play it in hum: /music frank ocean nights
 //   /music next | prev | pause | stop
-//   /music lofi | jazz | chill | classical | nature
+//   /music lofi | jazz | chill | classical | nature | radio
 //   /music vol 40
 //   /music clawd               show or hide DJ Clawd
 //
 // When Claude asks a permission question the music steps down and Clawd lifts one
 // headphone cup. Both come back when the question is answered. The host reads
 // on(...) and $.noun.method(...) from source, so they are written out in full.
+
+import { clamp, duckCommand, humView, livePosition, parseArgs, route, VOLUME_STEP } from "./logic.mjs";
 
 const STATIONS = [
   { id: "lofi", name: "lofi", color: "#d97757", url: "https://radio.nia.nc/radio/8020/lofi-hq-stream.aac" },
@@ -23,28 +26,37 @@ const STATIONS = [
   { id: "classical", name: "classical", color: "#7fb7a0", url: "https://stream.srg-ssr.ch/m/rsc_de/aacp_96" },
   { id: "nature", name: "nature", color: "#6fa8c7", url: "https://purenature-mynoise.radioca.st/stream" },
 ];
-const SONG_COLOR = "#d97757";
+const HUM_COLOR = "#d97757";
 const CLAWD_COLOR = "#d97757";
 
 const RELEASE_URL = "https://github.com/anzal1/hush/releases/latest/download/hush-macos";
-const YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+const HUM_INSTALL = "github:anzal1/hum";
+const HUM_DEFAULT_PORT = 3737;
 const POLL_MS = 2500;
-const VOLUME_STEP = 10;
+const HUM_POLL_MS = 1000;
+const HUM_STATE_MS = 1500;
+const HUM_PLAY_MS = 25000;
+const HUM_WAIT_MS = 20000;
+const HUM_MISSES = 10;
 const BAR_CELLS = 10;
 const COLLAPSE_CELLS = 4;
 const MAX_COLUMNS = 100;
-const SEARCH_RESULTS = 5;
 const CLAWD_ZONE = 12;
 const SESSION = Math.random().toString(36).slice(2, 8);
 
-// What the helper last said: { state, station, title, volume, ducked, pos, dur }.
+// What the radio helper last said: { state, station, title, volume, ducked, pos, dur }.
 let status = { state: "off", station: "", title: "", volume: 55, ducked: false, pos: 0, dur: 0 };
 let stationIndex = 0;
-let mode = "radio";
-let queue = [];
-let queueIndex = 0;
+let source = "radio";
+let hum = null;
+let humPort = HUM_DEFAULT_PORT;
+let humMisses = 0;
+let humBusy = false;
+let humDucked = false;
+let humSeen = "";
 let finding = "";
 let timer = null;
+let timerMs = 0;
 let failures = 0;
 let isLit = false;
 let clawdOn = true;
@@ -57,7 +69,7 @@ export function register(on) {
     await $.command.register({
       name: "music",
       description: "Free radio and any song above the prompt",
-      argumentHint: "[song or artist | next | prev | pause | stop | lofi | jazz | chill | classical | nature | vol <0-100> | clawd]",
+      argumentHint: "[song or artist | next | prev | pause | stop | lofi | jazz | chill | classical | nature | radio | vol <0-100> | clawd]",
       immediate: true,
     });
     const kept = await $.store.get("station").catch(() => undefined);
@@ -68,6 +80,8 @@ export function register(on) {
     if (typeof saved === "number") {
       status.volume = saved;
     }
+    const port = Number.parseInt((await $.env.get("HUM_PORT").catch(() => undefined)) ?? "", 10);
+    humPort = port > 0 && port < 65536 ? port : HUM_DEFAULT_PORT;
     const clawd = await $.store.get("clawd").catch(() => undefined);
     if (typeof clawd === "boolean") {
       clawdOn = clawd;
@@ -101,7 +115,7 @@ export function register(on) {
   });
 
   on("tool.call", async ($, e, next) => {
-    if (clawdOn && status.state === "playing" && !status.ducked) {
+    if (clawdOn && isPlaying() && !isDucked()) {
       nod = true;
       $.ui.invalidate("ui.render");
       $.clock.after(220, () => {
@@ -186,7 +200,7 @@ export function register(on) {
 async function paths($) {
   const home = await $.env.get("HOME");
   const dir = `${home}/.claude/hush`;
-  return { bin: `${$.plugin.root}/bin/hush`, socket: `${dir}/h.sock`, ytdlp: `${dir}/yt-dlp` };
+  return { bin: `${$.plugin.root}/bin/hush`, socket: `${dir}/h.sock` };
 }
 
 // Sends one command; resolves the helper's JSON reply, or null when it is not running.
@@ -246,161 +260,289 @@ async function download($, url, target) {
     .catch(() => ({ exitCode: 1 }));
 }
 
-// ---------- songs ----------
+// ---------- hum ----------
 
-async function ensureYtdlp($) {
-  const { ytdlp } = await paths($);
-  if (await exists($, ytdlp)) {
-    return true;
-  }
-  $.ui.toast("Hush is fetching its song finder (once, about 35 MB)", { timeoutMs: 8000 });
-  const got = await download($, YTDLP_URL, ytdlp);
-  return got.exitCode === 0;
+function humUrl(path) {
+  return `http://127.0.0.1:${humPort}${path}`;
 }
 
-async function runYtdlp($, args, timeoutMs) {
-  const { ytdlp } = await paths($);
-  return $.process
-    .run([ytdlp, "--no-warnings", ...args], { timeoutMs })
-    .catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+function now() {
+  return Date.now();
 }
 
-async function updateYtdlp($) {
-  const { ytdlp } = await paths($);
-  await $.process.run([ytdlp, "-U"], { timeoutMs: 120000 }).catch(() => undefined);
+// One request to hum's loopback remote. Resolves the parsed JSON, or null when hum does not answer in time.
+async function humFetch($, path, init, ms) {
+  let timeout;
+  const late = new Promise((resolve) => {
+    timeout = $.clock.after(ms, () => resolve(null));
+  });
+  const reply = await Promise.race([$.http.fetch(humUrl(path), init).catch(() => null), late]);
+  timeout.cancel();
+  if (!reply || !reply.ok) {
+    return null;
+  }
+  try {
+    return JSON.parse(reply.text);
+  } catch {
+    return null;
+  }
 }
 
-async function searchSongs($, query) {
-  const args = [
-    `ytsearch${SEARCH_RESULTS * 2}:${query}`,
-    "--flat-playlist",
-    "--print",
-    "%(id)s\t%(title)s\t%(channel)s\t%(duration)s",
-  ];
-  let run = await runYtdlp($, args, 90000);
-  if (run.exitCode !== 0 || !run.stdout.trim()) {
-    await updateYtdlp($);
-    run = await runYtdlp($, args, 90000);
-  }
-  const found = [];
-  for (const line of run.stdout.split("\n")) {
-    const [id, title, channel, duration] = line.split("\t");
-    const seconds = Number.parseInt(duration ?? "", 10);
-    if (id && title && seconds >= 30 && seconds <= 1200) {
-      found.push({ id, title, channel: channel && channel !== "NA" ? channel : "", duration: seconds });
-    }
-  }
-  return found.slice(0, SEARCH_RESULTS);
+async function humState($) {
+  return humFetch($, "/api/remote/state", undefined, HUM_STATE_MS);
 }
 
-async function streamUrl($, id) {
-  const run = await runYtdlp(
-    $,
-    ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "-g", `https://www.youtube.com/watch?v=${id}`],
-    90000,
-  );
-  const url = run.stdout.split("\n")[0]?.trim();
-  return run.exitCode === 0 && url?.startsWith("http") ? url : "";
+async function humSend($, body, ms = HUM_STATE_MS) {
+  const init = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+  return humFetch($, "/api/remote", init, ms);
 }
 
-async function playQuery($, query) {
-  if (!(await ensureHelper($))) {
-    return "Hush could not start its player. It needs macOS, and either Xcode's command line tools or a network connection to GitHub.";
+// Starts hum's server, detached. hum only opens its own tab when it has a terminal, so
+// HUM_NO_OPEN is set and Hush opens the visible player itself once the server answers.
+async function startHum($) {
+  await $.process
+    .run(
+      [
+        "/bin/sh",
+        "-c",
+        'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"; HUM_NO_OPEN=1 PORT="$1" nohup npx -y -p "$2" hum >/dev/null 2>&1 &',
+        "sh",
+        String(humPort),
+        HUM_INSTALL,
+      ],
+      { timeoutMs: 5000 },
+    )
+    .catch(() => undefined);
+}
+
+async function openHum($) {
+  await $.process.run(["/usr/bin/open", `http://localhost:${humPort}`], { timeoutMs: 5000 }).catch(() => undefined);
+}
+
+// Makes sure a hum window is open: starts the server when nothing answers, opens the player
+// when the server has no window, then waits for a window to connect.
+async function ensureHum($) {
+  let state = await humState($);
+  if (state && state.connected > 0) {
+    return "";
   }
-  if (!(await ensureYtdlp($))) {
-    return "Hush could not fetch its song finder. Check your connection and try again.";
-  }
-  finding = query;
+  finding = "opening hum…";
   $.ui.invalidate("ui.render");
-  const results = await searchSongs($, query);
-  if (results.length === 0) {
+  if (!state) {
+    await startHum($);
+  }
+  let opened = false;
+  for (let waited = 0; ; waited += 500) {
+    if (state && state.connected > 0) {
+      return "";
+    }
+    if (state && !opened) {
+      await openHum($);
+      opened = true;
+    }
+    if (waited >= HUM_WAIT_MS) {
+      break;
+    }
+    await $.clock.sleep(500);
+    state = await humState($);
+  }
+  if (state) {
+    return `hum is running but its player window is not open. Open http://localhost:${humPort} and run /music again.`;
+  }
+  return `hum needs to be open to play songs. Start it with: npx -y -p ${HUM_INSTALL} hum, then run /music again.`;
+}
+
+// Sends a song to hum, which plays it in its own visible YouTube player.
+async function playOnHum($, cmd) {
+  finding = `finding ${cmd.query}…`;
+  $.ui.invalidate("ui.render");
+  try {
+    const problem = await ensureHum($);
+    if (problem) {
+      return problem;
+    }
+    finding = `finding ${cmd.query}…`;
+    $.ui.invalidate("ui.render");
+    await quietRadio($);
+    const reply = await humSend($, cmd, HUM_PLAY_MS);
+    if (!reply) {
+      return "hum did not answer. Check that its player window is still open.";
+    }
+    if (!reply.ok) {
+      return reply.text || "hum could not play that.";
+    }
+    source = "hum";
+    humMisses = 0;
+    humSeen = "";
+    hum = (await humState($)) ?? hum;
+    watch($);
+    cue($);
+    return reply.text || `Playing ${cmd.query} in hum`;
+  } finally {
     finding = "";
     $.ui.invalidate("ui.render");
-    return `No songs found for "${query}"`;
   }
-  mode = "song";
-  queue = results;
-  return playQueued($, 0);
 }
 
-async function playQueued($, index) {
-  const song = queue[index];
-  if (!song) {
+// Stops the radio before a song starts, so the two never play together.
+async function quietRadio($) {
+  stopTimer();
+  if (status.state === "playing" || status.state === "loading" || status.state === "paused") {
     await ask($, "stop");
-    stop();
-    $.ui.invalidate("ui.render");
-    return "Queue finished";
   }
-  queueIndex = index;
-  finding = song.title;
-  $.ui.invalidate("ui.render");
-  let url = await streamUrl($, song.id);
-  if (!url) {
-    await updateYtdlp($);
-    url = await streamUrl($, song.id);
+  status = { ...status, state: "off", title: "", ducked: false, pos: 0, dur: 0 };
+}
+
+// Hands the sound back to the radio: hum is paused (and restored if it was stepped down).
+async function leaveHum($) {
+  if (source !== "hum") {
+    return;
   }
-  finding = "";
-  if (!url) {
-    $.ui.invalidate("ui.render");
-    return `Could not play "${song.title}". Try another song.`;
+  const view = humView(hum, now());
+  if (view && view.state === "playing") {
+    await humSend($, { cmd: "pause" });
   }
-  await ask($, `vol ${status.volume}`);
-  await ask($, "resume");
-  const reply = await ask($, `play ${url} ${song.title}`);
-  if (reply) {
-    adopt(reply);
+  if (humDucked) {
+    await humSend($, { cmd: "unduck" });
   }
-  failures = 0;
-  watch($);
-  cue($);
-  $.ui.invalidate("ui.render");
-  return `Playing ${song.title}${song.channel ? ` by ${song.channel}` : ""}`;
+  dropHum();
+}
+
+function dropHum() {
+  stopTimer();
+  source = "radio";
+  hum = null;
+  humDucked = false;
+  humMisses = 0;
+  humSeen = "";
+}
+
+async function pollHum($) {
+  if (humBusy || source !== "hum") {
+    return;
+  }
+  humBusy = true;
+  try {
+    const state = await humState($);
+    if (source !== "hum") {
+      return;
+    }
+    const view = humView(state, now());
+    if (!view) {
+      humMisses += 1;
+      if (state) {
+        hum = state;
+      }
+      if (humMisses >= HUM_MISSES) {
+        stop();
+      }
+      $.ui.invalidate("ui.render");
+      return;
+    }
+    humMisses = 0;
+    const before = humView(hum, now());
+    hum = state;
+    if (!before || before.title !== view.title) {
+      cue($);
+    }
+    const seen = [view.name, view.line, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
+    if (seen !== humSeen) {
+      humSeen = seen;
+      $.ui.invalidate("ui.render");
+    }
+  } finally {
+    humBusy = false;
+  }
 }
 
 // ---------- commands ----------
 
 async function runCommand($, args) {
-  const [first = "", ...rest] = args.split(/\s+/).filter(Boolean);
-  const word = first.toLowerCase();
-  const arg = rest[0];
-  if (word === "") {
-    return isActive() ? toggle($) : startStation($, stationIndex);
+  return perform($, parseArgs(args, STATIONS.map((s) => s.id)));
+}
+
+// Works out what an intent means for the current source, then does it.
+async function perform($, intent) {
+  const view = humView(hum, now());
+  const plan = route(intent, {
+    source,
+    humLive: view !== null,
+    radioActive: isActive(),
+    radioVolume: status.volume,
+    humVolume: view ? view.volume : 0,
+    stationIndex,
+  });
+  if (plan.target === "hum") {
+    return performHum($, plan);
   }
-  const station = STATIONS.findIndex((s) => s.id === word);
-  if (station >= 0 && rest.length === 0) {
-    return startStation($, station);
+  if (plan.target === "radio") {
+    return performRadio($, plan);
   }
-  if (word === "next") {
-    return mode === "song" ? playQueued($, queueIndex + 1) : startStation($, stationIndex + 1);
+  clawdOn = !clawdOn;
+  await $.store.set("clawd", clawdOn).catch(() => undefined);
+  $.ui.invalidate("ui.render");
+  return clawdOn ? "DJ Clawd is back" : "DJ Clawd is off";
+}
+
+async function performHum($, plan) {
+  if (plan.action === "play") {
+    return playOnHum($, plan.cmd);
   }
-  if (word === "prev" || word === "previous") {
-    return mode === "song" ? playQueued($, Math.max(0, queueIndex - 1)) : startStation($, stationIndex - 1);
+  if (plan.action === "volume") {
+    if (!plan.cmd) {
+      return `Volume is ${humView(hum, now())?.volume ?? 0}. Use /music vol 0-100`;
+    }
+    hum = { ...hum, volume: plan.level };
+    $.ui.invalidate("ui.render");
+    await humSend($, plan.cmd);
+    return `Volume ${plan.level}`;
   }
-  if (word === "stop" || word === "off") {
+  const reply = await humSend($, plan.cmd);
+  if (plan.action === "stop") {
+    dropHum();
+    $.ui.invalidate("ui.render");
+    return "Music stopped";
+  }
+  if (!reply) {
+    return "hum did not answer. Check that its player window is still open.";
+  }
+  if (!reply.ok) {
+    return reply.text || "hum could not do that.";
+  }
+  if (plan.action === "next" || plan.action === "prev") {
+    return reply.text || (plan.action === "next" ? "Next song" : "Previous song");
+  }
+  const playing = plan.cmd.cmd === "resume" || (plan.cmd.cmd === "toggle" && hum && !hum.playing);
+  hum = { ...hum, playing, position: livePosition(hum, now()), at: now() };
+  $.ui.invalidate("ui.render");
+  return playing ? "Playing" : "Paused";
+}
+
+async function performRadio($, plan) {
+  await leaveHum($);
+  if (plan.action === "station") {
+    return startStation($, plan.index);
+  }
+  if (plan.action === "next") {
+    return startStation($, stationIndex + 1);
+  }
+  if (plan.action === "prev") {
+    return startStation($, stationIndex - 1);
+  }
+  if (plan.action === "stop") {
     await ask($, "stop");
     stop();
     $.ui.invalidate("ui.render");
     return "Music stopped";
   }
-  if (word === "vol" || word === "volume") {
-    const n = Number.parseInt(arg ?? "", 10);
-    if (Number.isNaN(n)) {
+  if (plan.action === "volume") {
+    if (plan.level === null) {
       return `Volume is ${status.volume}. Use /music vol 0-100`;
     }
-    await setVolume($, n);
+    await setVolume($, plan.level);
     return `Volume ${status.volume}`;
   }
-  if (word === "clawd") {
-    clawdOn = !clawdOn;
-    await $.store.set("clawd", clawdOn).catch(() => undefined);
-    $.ui.invalidate("ui.render");
-    return clawdOn ? "DJ Clawd is back" : "DJ Clawd is off";
-  }
-  if ((word === "pause" || word === "play") && rest.length === 0) {
-    return isActive() ? toggle($) : startStation($, stationIndex);
-  }
-  const query = (word === "play" || word === "song" ? rest : [first, ...rest]).join(" ");
-  return playQuery($, query);
+  return toggle($);
 }
 
 async function toggle($) {
@@ -409,8 +551,6 @@ async function toggle($) {
 }
 
 async function startStation($, index) {
-  mode = "radio";
-  queue = [];
   stationIndex = (index + STATIONS.length) % STATIONS.length;
   const station = STATIONS[stationIndex];
   if (!(await ensureHelper($))) {
@@ -439,53 +579,86 @@ async function togglePause($) {
 }
 
 async function setVolume($, value) {
-  const clamped = Math.max(0, Math.min(100, value));
+  const clamped = clamp(value, 0, 100);
   status = { ...status, volume: clamped };
   await ask($, `vol ${clamped}`);
   await $.store.set("volume", clamped).catch(() => undefined);
   $.ui.invalidate("ui.render");
 }
 
-async function duck($, isDucked) {
-  if (!isActive() || status.ducked === isDucked) {
+// Steps the sound down for a question and back up after, on whichever source is playing.
+async function duck($, wanted) {
+  if (source === "hum") {
+    const body = duckCommand(wanted, humDucked);
+    if (!body || (wanted && !isActive())) {
+      return;
+    }
+    humDucked = wanted;
+    $.ui.invalidate("ui.render");
+    await humSend($, body);
     return;
   }
-  status = { ...status, ducked: isDucked };
+  if (!isActive() || status.ducked === wanted) {
+    return;
+  }
+  status = { ...status, ducked: wanted };
   $.ui.invalidate("ui.render");
-  await ask($, `${isDucked ? "duck" : "unduck"} ${SESSION}`);
+  await ask($, `${wanted ? "duck" : "unduck"} ${SESSION}`);
 }
 
 // ---------- state ----------
 
 function isActive() {
-  return finding !== "" || status.state === "playing" || status.state === "loading" || status.state === "paused";
+  if (finding !== "") {
+    return true;
+  }
+  if (source === "hum") {
+    return humView(hum, now()) !== null;
+  }
+  return status.state === "playing" || status.state === "loading" || status.state === "paused";
+}
+
+function isPlaying() {
+  if (source === "hum") {
+    return humView(hum, now())?.state === "playing";
+  }
+  return status.state === "playing";
+}
+
+function isDucked() {
+  return source === "hum" ? humDucked || Boolean(hum?.ducked) : status.ducked;
 }
 
 function adopt(reply) {
   const index = STATIONS.findIndex((s) => s.name === reply.station);
   if (index >= 0) {
     stationIndex = index;
-    mode = "radio";
-  } else if (reply.dur > 0) {
-    mode = "song";
   }
   status = { ...status, ...reply };
 }
 
+// Polls the source that is playing: the radio helper every 2.5 s, hum every second.
 function watch($) {
-  if (timer) {
+  const ms = source === "hum" ? HUM_POLL_MS : POLL_MS;
+  if (timer && timerMs === ms) {
     return;
   }
-  timer = $.clock.every(POLL_MS, () => {
-    void poll($);
+  stopTimer();
+  timerMs = ms;
+  timer = $.clock.every(ms, () => {
+    void (source === "hum" ? pollHum($) : poll($));
   });
 }
 
-function stop() {
+function stopTimer() {
   if (timer) {
     timer.cancel();
     timer = null;
   }
+}
+
+function stop() {
+  dropHum();
   finding = "";
   status = { ...status, state: "off", title: "", ducked: false, pos: 0, dur: 0 };
 }
@@ -497,16 +670,8 @@ async function poll($) {
     $.ui.invalidate("ui.render");
     return;
   }
-  if (reply.state === "ended" && mode === "song") {
-    await playQueued($, queueIndex + 1);
-    return;
-  }
   if (reply.state === "failed") {
     failures += 1;
-    if (mode === "song") {
-      await playQueued($, queueIndex + 1);
-      return;
-    }
     if (failures <= STATIONS.length) {
       await startStation($, stationIndex + 1);
       return;
@@ -555,7 +720,8 @@ function keyed(letter) {
   return isLit ? { hotkey: letter } : {};
 }
 
-function clock(seconds) {
+function clock(total) {
+  const seconds = Math.floor(total);
   const m = Math.floor(seconds / 60);
   const s = String(seconds % 60).padStart(2, "0");
   return `${m}:${s}`;
@@ -563,7 +729,7 @@ function clock(seconds) {
 
 // DJ Clawd: the banner mascot's head with headphones. One cup lifts when you are being asked something.
 function clawdFace() {
-  if (status.ducked) {
+  if (isDucked()) {
     return "(▐▛█▜▌ '";
   }
   return nod ? "(▐▙█▟▌)" : "(▐▛█▜▌)";
@@ -573,24 +739,28 @@ function clawdFace() {
 // bar first, then the tag, then DJ Clawd, then the buttons.
 function band($, ui, columns) {
   const { Box, Text, Button } = ui;
-  const isSong = mode === "song";
+  const song = source === "hum" ? humView(hum, now()) : null;
+  const isSong = song !== null;
+  const view = song ?? status;
   const station = STATIONS[stationIndex];
-  const accent = isSong ? SONG_COLOR : station.color;
-  const quiet = status.ducked || status.state === "paused";
-  const loading = finding !== "" || status.state === "loading";
+  const accent = isSong ? HUM_COLOR : station.color;
+  const ducked = isDucked();
+  const quiet = ducked || view.state === "paused";
+  const loading = finding !== "" || view.state === "loading";
   let title = status.title || `${station.name} radio`;
   if (finding) {
-    title = `finding ${finding}…`;
+    title = finding;
+  } else if (isSong) {
+    title = song.name;
   } else if (status.state === "loading") {
     title = "tuning…";
-  } else if (isSong) {
-    title = status.station;
   }
-  const tag = isSong ? (status.dur > 0 ? `${clock(status.pos)} / ${clock(status.dur)}` : "") : `${station.name} · live`;
-  const showBar = columns >= 70;
+  const tag = isSong ? (view.dur > 0 ? `${clock(view.pos)} / ${clock(view.dur)}` : "") : `${station.name} · live`;
+  // A song with lyrics gives the bar's room to the lyric line; the clock in the tag shows progress.
+  const showBar = columns >= 70 && !(isSong && song.hasLyrics);
   const showTag = columns >= 56 && tag !== "";
   const showButtons = columns >= 44;
-  const showClawd = clawdOn && columns >= 84 && status.state === "playing" && !finding;
+  const showClawd = clawdOn && columns >= 84 && view.state === "playing" && !finding;
   const lit = isLit && showButtons;
   const showVolButtons = lit && columns >= 70;
   const barText = showBar ? BAR_CELLS + 1 : 0;
@@ -602,21 +772,29 @@ function band($, ui, columns) {
   const clawdText = showClawd ? CLAWD_ZONE + 2 : 0;
   const titleCells = Math.max(8, columns - 2 - tagText - barText - buttonsText - clawdText - 1);
 
-  const parts = [
-    Text({ color: accent, dimColor: quiet, children: "♪ " }),
-    Text({ dimColor: quiet || loading, children: fit(title, titleCells).padEnd(titleCells) }),
-  ];
+  const parts = [Text({ color: accent, dimColor: quiet, children: "♪ " })];
+  if (isSong && song.hasLyrics && !finding && titleCells >= 40) {
+    // Title and artist keep a fixed share, so the buttons stay put while the lyric changes.
+    const nameCells = Math.min(song.name.length, Math.max(16, Math.floor(titleCells * 0.5)));
+    const lyricCells = titleCells - nameCells - 2;
+    parts.push(Text({ dimColor: quiet, children: fit(song.name, nameCells).padEnd(nameCells) }));
+    parts.push(Text({ children: "  " }));
+    parts.push(Text({ color: accent, dimColor: quiet, italic: true, children: fit(song.line, lyricCells).padEnd(lyricCells) }));
+  } else {
+    parts.push(Text({ dimColor: quiet || loading, children: fit(title, titleCells).padEnd(titleCells) }));
+  }
   if (showTag) {
     parts.push(Text({ dimColor: true, children: `  ${tag}` }));
   }
   if (showBar) {
     let filled;
     if (isSong) {
-      filled = status.dur > 0 ? Math.round((status.pos / status.dur) * BAR_CELLS) : 0;
+      filled = view.dur > 0 ? Math.round((view.pos / view.dur) * BAR_CELLS) : 0;
     } else {
-      const effective = status.ducked ? Math.round(status.volume * 0.35) : status.volume;
+      const effective = ducked ? Math.round(status.volume * 0.35) : status.volume;
       filled = status.state === "paused" ? 0 : Math.round((effective / 100) * BAR_CELLS);
     }
+    filled = clamp(filled, 0, BAR_CELLS);
     parts.push(Text({ children: " " }));
     parts.push(Text({ color: accent, dimColor: quiet, children: "━".repeat(filled) }));
     parts.push(Text({ dimColor: true, children: "─".repeat(BAR_CELLS - filled) }));
@@ -630,7 +808,7 @@ function band($, ui, columns) {
     parts.push(
       Button({
         key: "play",
-        label: status.state === "paused" ? "play" : "pause",
+        label: view.state === "paused" ? "play" : "pause",
         ...keyed("p"),
         plain: true,
         autoFocus: true,
@@ -645,7 +823,7 @@ function band($, ui, columns) {
     if (showVolButtons) {
       parts.push(Text({ children: "  " }));
       parts.push(Button({ key: "down", label: "-", hotkey: "j", plain: true, onPress: () => void press($, "down") }));
-      parts.push(Text({ dimColor: true, children: ` vol ${status.volume} ` }));
+      parts.push(Text({ dimColor: true, children: ` vol ${view.volume} ` }));
       parts.push(Button({ key: "up", label: "+", hotkey: "k", plain: true, onPress: () => void press($, "up") }));
     }
   }
@@ -660,22 +838,21 @@ function band($, ui, columns) {
   const hint = Text({
     dimColor: true,
     children: showVolButtons
-      ? " p pause · h l station · j k volume · esc back to the prompt"
-      : " p pause · h l station · esc back to the prompt",
+      ? ` p pause · h l ${isSong ? "song" : "station"} · j k volume · esc back to the prompt`
+      : ` p pause · h l ${isSong ? "song" : "station"} · esc back to the prompt`,
   });
   return Box({ flexDirection: "column", children: [row, hint] });
 }
 
 async function press($, what) {
-  if (what === "pause") {
-    await togglePause($);
-  } else if (what === "next") {
-    await runCommand($, "next");
-  } else if (what === "prev") {
-    await runCommand($, "prev");
-  } else if (what === "up") {
-    await setVolume($, status.volume + VOLUME_STEP);
-  } else if (what === "down") {
-    await setVolume($, status.volume - VOLUME_STEP);
+  const keys = {
+    pause: { kind: "toggle" },
+    next: { kind: "next" },
+    prev: { kind: "prev" },
+    up: { kind: "vol", delta: VOLUME_STEP },
+    down: { kind: "vol", delta: -VOLUME_STEP },
+  };
+  if (keys[what]) {
+    await perform($, keys[what]);
   }
 }

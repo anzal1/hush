@@ -7,7 +7,7 @@
     {
       "name": "hush",
       "source": "./",
-      "description": "Free internet radio above the prompt that steps down when Claude asks you a question.",
+      "description": "Free internet radio, and any song through hum, above the prompt. Steps down when Claude asks you a question.",
       "category": "productivity",
       "tags": [
         "music",

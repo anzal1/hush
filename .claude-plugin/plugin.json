@@ -1,7 +1,7 @@
 {
   "name": "hush",
-  "version": "0.2.1",
-  "description": "Free internet radio and any song in one quiet line above the prompt, with a DJ Clawd. The music steps down when Claude asks you a question. No account, no setup. macOS.",
+  "version": "0.3.0",
+  "description": "Free internet radio above the prompt, and any song through hum's visible YouTube player, with the synced lyric line and a DJ Clawd. The music steps down when Claude asks you a question. No account. macOS.",
   "author": {
     "name": "Anzal"
   },
