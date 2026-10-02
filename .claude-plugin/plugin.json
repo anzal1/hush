@@ -1,6 +1,6 @@
 {
   "name": "hush",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Free internet radio above the prompt, and any song through hum's visible YouTube player, with the synced lyric line, a DJ Clawd and an optional big panel with the cover and an aurora. The music steps down when Claude asks you a question. No account. macOS.",
   "author": {
     "name": "Anzal"

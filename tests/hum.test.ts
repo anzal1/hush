@@ -192,29 +192,37 @@ test('a running hum with no window gets its player opened, not restarted', async
 })
 
 test('when hum never opens, the answer says hum needs to be open and the radio is left alone', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', (_$: any, e: any) => void toasts.push(e.text))
   const { hum, helper, clock } = await boot($, on)
   await music($, 'lofi')
   hum.up = false
   hum.connected = 0
   hum.startable = false
   const pending = music($, 'nights')
-  await clock.advance(25000)
+  await clock.advance(8000)
   const answer = await pending
-  expect(answer.text).toMatch(/^hum needs to be open to play songs\. Start it with: npx -y -p github:anzal1\/hum hum/)
-  expect(answer.text).not.toContain('\u2014')
+  // A command must answer within its budget, so a slow start answers first and finishes later.
+  expect(answer.text).toMatch(/^Starting hum\./)
+  await clock.advance(95000)
+  expect(toasts.at(-1)).toMatch(/^hush: hum needs to be open to play songs\. Start it with: npx -y -p github:anzal1\/hum hum/)
+  expect(toasts.join(' ')).not.toContain('\u2014')
   expect(hum.posted.length).toBe(0)
   expect(helper.state).toBe('playing')
 })
 
 test('when hum starts but no window ever connects, the answer says so', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', (_$: any, e: any) => void toasts.push(e.text))
   const { hum, clock } = await boot($, on)
   hum.up = false
   hum.connected = 0
   hum.opensWindow = false
   const pending = music($, 'nights')
-  await clock.advance(25000)
-  const answer = await pending
-  expect(answer.text).toMatch(/^hum is running but its player window is not open/)
+  await clock.advance(8000)
+  expect((await pending).text).toMatch(/^Starting hum\./)
+  await clock.advance(95000)
+  expect(toasts.at(-1)).toMatch(/^hush: hum is running but its player window is not open/)
   expect(hum.posted.length).toBe(0)
 })
 

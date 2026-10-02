@@ -74,7 +74,9 @@ const POLL_MS = 2500;
 const HUM_POLL_MS = 1000;
 const HUM_STATE_MS = 1500;
 const HUM_PLAY_MS = 25000;
-const HUM_WAIT_MS = 20000;
+const HUM_WAIT_MS = 90000;
+// How long /music waits before answering and finishing in the background.
+const ANSWER_MS = 7000;
 const HUM_MISSES = 10;
 const BAR_CELLS = 10;
 const COLLAPSE_CELLS = 4;
@@ -161,9 +163,17 @@ export function register(on) {
     return started;
   });
 
+  // A command hook has ten seconds. Starting hum (the first time it is also downloaded) and
+  // waiting for its tab can take longer, so answer in time and let the rest finish on its own;
+  // the outcome arrives as a toast.
   on("command.run", { command: "music" }, async ($, e) => {
-    const text = await runCommand($, e.args.trim());
-    return { text };
+    const work = runCommand($, e.args.trim());
+    const text = await Promise.race([work, $.clock.sleep(ANSWER_MS).then(() => null)]);
+    if (text !== null) {
+      return { text };
+    }
+    work.then((t) => t && $.ui.toast(`hush: ${t}`)).catch(() => undefined);
+    return { text: "Starting hum. The song plays in the hum tab once it connects; click that tab once if your browser asks." };
   });
 
   // Claude Code's own guard hides classic.PermissionRequest from installed mods, so the
