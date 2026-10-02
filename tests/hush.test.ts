@@ -105,6 +105,7 @@ test('the band narrows: volume line goes first, then the tag', async ($, on) => 
   const mid = await $.ui.mount(PROMPT(62))
   expect(await mid.find({ type: 'Text', text: /━/ })).toBeUndefined()
   expect(await mid.find({ type: 'Text', text: /lofi · live/ })).toBeDefined()
+  await mid.unmount()
   const tight = await $.ui.mount(PROMPT(34))
   expect(await tight.find({ type: 'Text', text: /lofi · live/ })).toBeUndefined()
   expect(await tight.find({ type: 'Text', text: /Nights/ })).toBeDefined()
