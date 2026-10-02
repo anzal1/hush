@@ -326,6 +326,11 @@ async function poll($) {
 
 // ---------- drawing ----------
 
+// A hotkey makes the engine draw a "h:" prefix, so only the focused band carries them.
+function keyed(letter) {
+  return isLit ? { hotkey: letter } : {};
+}
+
 function fit(text, cells) {
   if (cells <= 0) {
     return "";
@@ -348,7 +353,8 @@ function band($, ui, columns) {
   const lit = isLit && showButtons;
   const volumeText = showVolume ? VOLUME_CELLS + 1 : 0;
   const tagText = showTag ? tag.length + 2 : 0;
-  const buttonsText = showButtons ? (lit ? 36 : 12) : 0;
+  const showVolButtons = lit && columns >= 70;
+  const buttonsText = showButtons ? (showVolButtons ? 40 : lit ? 24 : 12) : 0;
   const titleCells = Math.max(8, columns - 2 - tagText - volumeText - buttonsText - 1);
 
   const parts = [
@@ -368,14 +374,14 @@ function band($, ui, columns) {
   if (showButtons) {
     parts.push(Text({ children: "  " }));
     parts.push(
-      Button({ key: "prev", label: "‹", hotkey: "h", plain: true, dimColor: !lit, onPress: () => void press($, "prev") }),
+      Button({ key: "prev", label: "‹", ...keyed("h"), plain: true, dimColor: !lit, onPress: () => void press($, "prev") }),
     );
     parts.push(Text({ children: " " }));
     parts.push(
       Button({
         key: "play",
         label: status.state === "paused" ? "play" : "pause",
-        hotkey: "p",
+        ...keyed("p"),
         plain: true,
         autoFocus: true,
         dimColor: !lit,
@@ -384,9 +390,9 @@ function band($, ui, columns) {
     );
     parts.push(Text({ children: " " }));
     parts.push(
-      Button({ key: "next", label: "›", hotkey: "l", plain: true, dimColor: !lit, onPress: () => void press($, "next") }),
+      Button({ key: "next", label: "›", ...keyed("l"), plain: true, dimColor: !lit, onPress: () => void press($, "next") }),
     );
-    if (lit) {
+    if (showVolButtons) {
       parts.push(Text({ children: "  " }));
       parts.push(
         Button({ key: "down", label: "-", hotkey: "j", plain: true, onPress: () => void press($, "down") }),
@@ -399,7 +405,10 @@ function band($, ui, columns) {
   if (!lit) {
     return row;
   }
-  const hint = Text({ dimColor: true, children: " p pause · h l station · j k volume · esc back to the prompt" });
+  const hint = Text({
+    dimColor: true,
+    children: showVolButtons ? " p pause · h l station · j k volume · esc back to the prompt" : " p pause · h l station · esc back to the prompt",
+  });
   return Box({ flexDirection: "column", children: [row, hint] });
 }
 
