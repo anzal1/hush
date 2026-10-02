@@ -142,7 +142,7 @@ export function register(on) {
   });
 
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    if (e.surface !== "terminal" || e.props.hasSurvey || !isActive()) {
+    if (e.props.hasSurvey || !isActive()) {
       return next(e);
     }
     const ui = $.ui.resolve(e);
