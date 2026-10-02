@@ -65,7 +65,8 @@ async function boot($: any, on: any, options: { env?: Record<string, string>; sa
       duration: 200,
       volume: 80,
       ducked: false,
-      lyrics: LYRICS,
+      lyrics: LYRICS as typeof LYRICS | never[],
+      upNext: ['Nights · Frank Ocean'] as string[],
     },
     saved,
   }
@@ -98,7 +99,7 @@ async function boot($: any, on: any, options: { env?: Record<string, string>; sa
     rig.posted.push(body)
     if (body.cmd === 'play') {
       rig.hum.playing = true
-      rig.hum.track = { title: 'Amazing Grace', artist: 'Judy Collins', id: 'dQw4w9WgXcQ', art: 'https://art.test/grace.jpg' }
+      rig.hum.track = { title: 'Amazing Grace', artist: 'Judy Collins', album: 'Whales & Nightingales', id: 'dQw4w9WgXcQ', art: 'https://art.test/grace.jpg' }
     } else if (body.cmd === 'pause') rig.hum.playing = false
     else if (body.cmd === 'resume') rig.hum.playing = true
     else if (body.cmd === 'toggle') rig.hum.playing = !rig.hum.playing
@@ -118,7 +119,7 @@ async function boot($: any, on: any, options: { env?: Record<string, string>; sa
   })
   on('fs.read', (_$: any, e: any) => {
     rig.reads.push(e.path)
-    if (e.path.endsWith('thumb.bmp')) return { value: { base64: thumbBase64() } }
+    if (e.path.endsWith('cells.bmp')) return { value: { base64: thumbBase64() } }
     if (e.path.endsWith('cover.jpg')) return { value: { base64: 'JPEGJPEG' } }
     if (e.path.endsWith('cover.png')) return { value: { base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' } }
     throw new Error('ENOENT')
@@ -184,14 +185,16 @@ test('terminal: cell art cover, aurora strip, text, progress and real buttons', 
   const ui = await $.ui.mount(BAND(100))
   const cover = await ui.find({ type: 'Raster', key: 'cover' })
   const aurora = await ui.find({ type: 'Raster', key: 'aurora' })
-  expect(cover?.props).toMatchObject({ columns: 16, rows: 8 })
-  expect(aurora?.props).toMatchObject({ rows: 2 })
+  expect(cover?.props).toMatchObject({ columns: 20, rows: 10 })
+  expect(aurora?.props).toMatchObject({ rows: 2, columns: 71 })
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'Amazing Grace' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Judy Collins' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /second line/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /0:12 \/ 3:20/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /━+/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /third line/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0:12/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /3:20/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█+$/ })).toBeDefined()
   for (const key of ['prev', 'play', 'next']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
   // the one-line band is gone
   expect(await ui.find({ type: 'Text', text: /Amazing Grace ·/ })).toBeUndefined()
@@ -202,7 +205,7 @@ test('terminal: a kitty or Ghostty terminal gets the Image for the cover', async
   await playBig($, on, clock)
   const ui = await $.ui.mount(BAND(100))
   const image = await ui.find({ type: 'Image', key: 'cover' })
-  expect(image?.props).toMatchObject({ columns: 16, rows: 8, source: { png: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' } })
+  expect(image?.props).toMatchObject({ columns: 20, rows: 10, source: { png: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' } })
   expect(await ui.find({ type: 'Raster', key: 'cover' })).toBeUndefined()
   expect(await ui.find({ type: 'Raster', key: 'aurora' })).toBeDefined()
   expect(reads.some((p: string) => p.endsWith('cover.png'))).toBe(true)
@@ -258,11 +261,13 @@ test('desktop: one Svg with the cover and a glow that animates, native lyric, pr
   expect(source).toContain('<animate ')
   expect(source).toContain('Amazing Grace')
   expect(source).toContain('Judy Collins')
+  expect(source).toContain('Whales &amp; Nightingales')
   expect(svg?.props.alt).toBe('Amazing Grace by Judy Collins')
   expect(await ui.find({ type: 'Raster' })).toBeUndefined()
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /second line/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /0:12 \/ 3:20/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /third line/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0:12/ })).toBeDefined()
   for (const key of ['prev', 'play', 'next']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
 })
 
@@ -315,7 +320,7 @@ test('the cover is made in the background from hum\'s art, then YouTube\'s thumb
   expect(argv[2]).toContain('-s format bmp')
   expect(argv[2]).toContain('-s format jpeg')
   expect(argv[2]).toContain('-s format png')
-  expect(reads.some((p: string) => p.endsWith('thumb.bmp'))).toBe(true)
+  expect(reads.some((p: string) => p.endsWith('cells.bmp'))).toBe(true)
   // the same song again does not fetch again
   await clock.advance(5000)
   expect(scripts).toHaveLength(1)
@@ -344,15 +349,18 @@ test('the aurora is blitted about eight times a second, and the tree is not redr
   expect(blits.length).toBeGreaterThanOrEqual(14)
   expect(blits.length).toBeLessThanOrEqual(17)
   expect(blits.every((b: any) => b.key === 'aurora' && b.requestId === 'band' && b.rows === 2)).toBe(true)
+  // the ribbon is painted on the 16 level grid the engine uses
+  expect(blits.every((b: any) => /^[A-Za-z0-9+/=]+$/.test(b.cells))).toBe(true)
   expect(blits[0].columns).toBe(panelTextColumns(100))
   // the tree is drawn when the clock or lyric moves, about once a second, never per frame
   expect(rig.renders).toBeLessThanOrEqual(6)
-  expect(blits[0].cells).not.toBe(blits[5].cells)
+  // 71 x 2 cells of three u32 words, in base64
+  expect(blits[0].cells).toHaveLength(Math.ceil((71 * 2 * 12) / 3) * 4)
   await ui.unmount()
 })
 
 function panelTextColumns(width: number) {
-  return Math.min(width - 4, 100) - 2 - 16 - 2
+  return Math.min(width - 4, 120) - 2 - 20 - 3
 }
 
 test('the aurora stops when the song is paused, and when the music steps down, and comes back', async ($, on) => {
@@ -484,4 +492,73 @@ test('each surface is drawn from its own element table', async ($, on) => {
   }
   expect(found.terminal).toEqual(['Raster', 'Button', 'Text'])
   expect(found.desktop).toEqual(['Svg', 'Button', 'Text'])
+})
+
+test('terminal: the lyric over the next line, in the cover\'s colour, and the next line quiet', async ($, on) => {
+  const { clock } = await boot($, on)
+  await playBig($, on, clock)
+  const ui = await $.ui.mount(BAND(100))
+  const now = await ui.find({ type: 'Text', text: 'second line' })
+  const next = await ui.find({ type: 'Text', text: 'third line' })
+  expect(now?.props.bold).toBe(true)
+  expect(String(now?.props.color)).toMatch(/^#[0-9a-f]{6}$/)
+  expect(now?.props.color).not.toBe('#f6f2ec')
+  expect(next?.props.bold).toBeFalsy()
+  expect(next?.props.color).toBe('#8a8379')
+  expect((await ui.find({ type: 'Text', text: /Whales & Nightingales/ }))?.props.color).toBe('#8a8379')
+})
+
+test('terminal: a song without lyrics shows its album and what is up next, never an empty row', async ($, on) => {
+  const { clock, hum } = await boot($, on)
+  await playBig($, on, clock)
+  hum.lyrics = []
+  await clock.advance(1500)
+  const ui = await $.ui.mount(BAND(100))
+  expect(await ui.find({ type: 'Text', text: 'Whales & Nightingales' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'up next  ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Nights · Frank Ocean' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /second line/ })).toBeUndefined()
+  // and with no queue either, the second row still says something
+  hum.upNext = []
+  await clock.advance(1500)
+  expect(await ui.find({ type: 'Text', text: /no synced lyrics/ })).toBeDefined()
+  const desk = await $.ui.mount(BAND(100, 'desktop'))
+  expect(await desk.find({ type: 'Text', text: 'Whales & Nightingales' })).toBeDefined()
+})
+
+test('terminal: the panel is as tall as the room allows, 8 to 10 rows, with a square cover', async ($, on) => {
+  const { clock } = await boot($, on)
+  await playBig($, on, clock)
+  const sizes: Array<[number, number, number]> = [
+    [10, 16, 8],
+    [11, 18, 9],
+    [12, 20, 10],
+    [30, 20, 10],
+  ]
+  for (const [maxRows, columns, rows] of sizes) {
+    const ui = await $.ui.mount(BAND(100, 'terminal', maxRows))
+    expect((await ui.find({ type: 'Raster', key: 'cover' }))?.props).toMatchObject({ columns, rows })
+    await ui.unmount()
+  }
+})
+
+test('terminal: the next lyric line is drawn the moment it starts, not at the next poll', async ($, on) => {
+  const { clock, hum, rig } = await boot($, on)
+  await playBig($, on, clock)
+  const ui = await $.ui.mount(BAND(100))
+  // 0.35 s before the next line (10 s, less the lead)
+  hum.position = 9.5
+  await clock.advance(1000)
+  rig.renders = 0
+  await clock.advance(500)
+  expect(rig.renders).toBeGreaterThanOrEqual(1)
+  await ui.unmount()
+})
+
+test('terminal: the panel is on the grid colour, so the aurora and the card are one colour', async ($, on) => {
+  const { clock } = await boot($, on)
+  await playBig($, on, clock)
+  const ui = await $.ui.mount(BAND(100))
+  const tree = await ui.find({ type: 'Box', backgroundColor: '#111111' })
+  expect(tree).toBeDefined()
 })

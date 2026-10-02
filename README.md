@@ -30,18 +30,30 @@ Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station (previous and n
 `/music big` swaps the one-line band for a richer panel while a song plays through hum. Run it again to go back.
 Hush remembers the choice. Radio always keeps its one-line band.
 
-The panel shows the cover, an aurora glow in the cover's colours on hum's dark warm background, the title, the artist,
-the live lyric line, progress with times, and real prev, play or pause and next buttons that call hum.
-DJ Clawd stays: he sits at the end of the buttons row, nods on tool calls and lifts a headphone cup when Claude asks
-you something. When the music steps down the glow dims and holds still.
+The panel shows the cover, a ribbon of aurora in the cover's colours, the title, the artist (and album), the lyric being
+sung over the next line as a karaoke preview, a progress bar with the times, and real prev, play or pause and next
+buttons that call hum. A song without synced lyrics never leaves a gap: its album takes the first line and
+"up next" (the next track in hum's queue) the second. DJ Clawd stays: he sits at the end of the buttons row, nods on
+tool calls and lifts a headphone cup when Claude asks you something. When the music steps down the glow dims and holds
+still.
 
-- Terminal: the cover is a picture where the terminal shows them (kitty, Ghostty), and half-block cell art elsewhere
-  (`HUSH_COVER=cells` or `image` forces one). The aurora is a strip of cells repainted about eight times a second, only
-  while the panel is on screen and the song plays. It is 8 rows tall, and below 60 columns (or without the rows) the
-  one-line band is drawn instead.
-- Desktop (the Code tab in the Claude app): one SVG holds the cover on a glow that drifts by SMIL, with the title and
-  artist. The lyric line, progress and buttons are native elements under it, so the SVG does not change each second and
-  its animation is not restarted. Pausing or a question swaps in a still glow.
+- Terminal: the cover is a picture where the terminal shows them (kitty, Ghostty), and quadrant-block cell art elsewhere
+  (`HUSH_COVER=cells` or `image` forces one). Quadrant blocks (▘▝▀▖▌▞▛▗▚▐▜▄▙▟█) carry 2x2 pixels in each cell in two
+  colours, so the cover is twice as sharp across as half blocks, and it is given a little contrast, colour and an unsharp
+  mask first so it reads crisply at 16 to 20 columns. The panel is as tall as the room allows, 8 to 10 rows (a 20 x 10
+  cover on a terminal of about 36 rows or more), and the cover stays square.
+- The aurora is a two row ribbon of cells repainted about eight times a second, only while the panel is on screen and the
+  song plays. Claude Code paints a Raster in 16 levels a channel, which turns a dark glow into visible bands, so the
+  ribbon is rounded to that grid with an ordered (Bayer) dither across the quadrant sub-pixels and fades to nothing at its
+  ends and edges. For that reason the panel's background is `#111111`, the grid colour nearest hum's `#08070b`, so the
+  dark cells of the glow and the card around them are one colour. Below 60 columns (or without the rows) the one-line band
+  is drawn instead.
+- Progress is drawn to eighths of a cell (▏▎▍▌▋▊▉█) in a gradient of the cover's two strongest colours over a dim
+  track. Play or pause is a pill in a deep shade of the cover's colour; prev and next are plain words. All are real buttons.
+- Desktop (the Code tab in the Claude app): one SVG holds the cover with rounded corners on a haze of its own colours,
+  the title, artist and album and three bars that dance while it plays (SMIL). The lyric lines, progress and buttons are
+  native elements under it, so the SVG does not change each second and its animation is not restarted. Pausing or a
+  question swaps in a still glow.
 
 The cover comes from hum's art (or YouTube's thumbnail), is downloaded with `curl` and resized with macOS's `sips`,
 and is cached in `~/.claude/hush/art/` (the 40 newest tracks). Nothing new is installed.
@@ -58,8 +70,8 @@ A mod runs with your full permissions. Read `hooks/register.mjs` and `native/hus
 ## How it works
 
 `hooks/register.mjs` is the mod. It talks to `bin/hush` over a unix socket (`~/.claude/hush/h.sock`).
-`hooks/logic.mjs` holds the pure parts: what a `/music` command means for radio or hum, and which lyric line is being sung.
-`hooks/panel.mjs` holds the pure parts of the big panel: reading the cover's BMP, the palette, the half-block cells, the aurora, the SVG and which layout fits.
+`hooks/logic.mjs` holds the pure parts: what a `/music` command means for radio or hum, and which lyric line is being sung and which comes next.
+`hooks/panel.mjs` holds the pure parts of the big panel: reading the cover's BMP, the palette, the quadrant-block cover, the dithered aurora, the eighth-block progress, the lyric layout, the SVG and which layout fits.
 The helper quits by itself 90 seconds after the last Claude Code session stops talking to it.
 If `bin/hush` is missing the mod builds it from `native/hush.swift` with `swiftc`. Rebuild with `./build.sh`.
 

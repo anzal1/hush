@@ -42,6 +42,34 @@ export function lyricLine(lyrics, seconds) {
   return best && typeof best.text === "string" ? best.text.trim() : "";
 }
 
+// The line being sung, the one after it, and how many seconds until that one starts (null
+// when there is none). Blank lines in the file are interludes: `line` is "" for one, and the
+// next line skips them. Before the first line, `line` is "" and `next` is the first line.
+export function lyricWindow(lyrics, seconds) {
+  const none = { line: "", next: "", nextIn: null };
+  if (!Array.isArray(lyrics)) {
+    return none;
+  }
+  const cutoff = seconds + LYRIC_LEAD;
+  let best = null;
+  for (const entry of lyrics) {
+    if (entry && typeof entry.t === "number" && entry.t <= cutoff && (best === null || entry.t >= best.t)) {
+      best = entry;
+    }
+  }
+  let next = null;
+  for (const entry of lyrics) {
+    if (entry && typeof entry.t === "number" && typeof entry.text === "string" && entry.text.trim() !== "" && entry.t > cutoff && (next === null || entry.t < next.t)) {
+      next = entry;
+    }
+  }
+  return {
+    line: best && typeof best.text === "string" ? best.text.trim() : "",
+    next: next ? next.text.trim() : "",
+    nextIn: next ? next.t - cutoff : null,
+  };
+}
+
 // What the band draws for hum, or null when no hum window has a track.
 export function humView(state, now) {
   if (!state || !(state.connected > 0) || !state.track) {
@@ -51,6 +79,8 @@ export function humView(state, now) {
   const artist = state.track.artist || "";
   const title = state.track.title || artist || "hum";
   const lyrics = Array.isArray(state.lyrics) ? state.lyrics : [];
+  const window = lyricWindow(lyrics, pos);
+  const queue = Array.isArray(state.upNext) ? state.upNext.find((x) => typeof x === "string" && x.trim() !== "") : "";
   return {
     state: state.playing ? "playing" : "paused",
     title,
@@ -58,8 +88,12 @@ export function humView(state, now) {
     name: artist && artist !== title ? `${title} · ${artist}` : title,
     id: typeof state.track.id === "string" ? state.track.id : "",
     art: typeof state.track.art === "string" ? state.track.art : "",
-    line: lyricLine(lyrics, pos),
+    line: window.line,
+    next: window.next,
+    nextIn: window.nextIn,
     hasLyrics: lyrics.length > 0,
+    album: typeof state.track.album === "string" && state.track.album !== title ? state.track.album.trim() : "",
+    upNext: typeof queue === "string" ? queue.trim() : "",
     pos,
     dur: state.duration > 0 ? state.duration : 0,
     volume: Number.isFinite(state.volume) ? state.volume : 0,

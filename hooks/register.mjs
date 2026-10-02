@@ -31,11 +31,10 @@ import {
   BONE_DIM,
   BONE_SOFT,
   canShowImages,
+  captionLines,
   chooseLayout,
   clock,
-  COVER_COLUMNS,
   COVER_KEEP,
-  COVER_ROWS,
   COVER_SCRIPT,
   coverKey,
   coverUrls,
@@ -44,17 +43,23 @@ import {
   FALLBACK_COLORS,
   fit,
   fromBase64,
-  halfBlockCells,
   hex,
-  PANEL_GAP,
+  mix,
+  PANEL_BG,
+  PANEL_BG_HEX,
+  PANEL_MAX_COLUMNS,
   PANEL_PAD,
   palette,
+  panelGeometry,
   panelSvg,
-  panelWidths,
   parseBmp,
+  pillColor,
   placeholderCells,
-  progressBar,
-  RIBBON_ROWS,
+  progressRuns,
+  quadrantCells,
+  timeLabels,
+  tone,
+  TRACK,
 } from "./panel.mjs";
 
 const STATIONS = [
@@ -114,6 +119,7 @@ let auroraTimer = null;
 let auroraBusy = false;
 let auroraMisses = 0;
 let auroraBlocked = "";
+let lineTimer = null;
 let imagesBlocked = false;
 let probed = "";
 let walk = CLAWD_ZONE - 7;
@@ -263,6 +269,7 @@ export function register(on) {
     const ui = $.ui.resolve(e);
     const width = e.props.bodyColumns ?? 80;
     const columns = Math.min(width - COLLAPSE_CELLS, MAX_COLUMNS);
+    const panelColumns = Math.min(width - COLLAPSE_CELLS, PANEL_MAX_COLUMNS);
     const song = source === "hum" && finding === "" ? humView(hum, now()) : null;
     const layout = chooseLayout({
       big,
@@ -274,7 +281,7 @@ export function register(on) {
     });
     const beneath = await next(e);
     if (layout.mode === "panel") {
-      const drawn = e.surface === "desktop" ? desktopPanel($, ui, song, columns) : terminalPanel($, ui, e, layout, song, columns);
+      const drawn = e.surface === "desktop" ? desktopPanel($, ui, song, columns) : terminalPanel($, ui, e, layout, song, panelColumns);
       return ui.Box({ flexDirection: "column", children: [drawn, beneath] });
     }
     leavePanel($, e);
@@ -517,6 +524,7 @@ async function leaveHum($) {
 function dropHum() {
   stopTimer();
   stopAurora();
+  stopLine();
   cover = emptyCover("");
   source = "radio";
   hum = null;
@@ -555,11 +563,12 @@ async function pollHum($) {
     }
     wantCover($);
     syncAurora($);
-    const seen = [view.name, view.line, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
+    const seen = [view.name, view.line, view.next, view.album, view.upNext, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
     if (seen !== humSeen) {
       humSeen = seen;
       $.ui.invalidate("ui.render");
     }
+    scheduleLine($, view);
   } finally {
     humBusy = false;
   }
@@ -963,7 +972,7 @@ function band($, ui, columns) {
 // ---------- big panel ----------
 
 function emptyCover(key) {
-  return { key, state: "none", png: "", jpg: "", cells: "", colors: FALLBACK_COLORS, accent: FALLBACK_ACCENT, filler: "" };
+  return { key, state: "none", png: "", jpg: "", thumb: null, cells: "", cellsKey: "", colors: FALLBACK_COLORS, accent: FALLBACK_ACCENT };
 }
 
 // Starts reading the cover of the song that plays, when the big panel is on and it is a new song.
@@ -1004,23 +1013,36 @@ async function loadCover($, key, track) {
 
 async function readCover($, dir) {
   try {
-    const thumb = await $.fs.read(`${dir}/thumb.bmp`, { as: "bytes" });
-    const image = parseBmp(fromBase64(thumb.base64));
+    const small = await $.fs.read(`${dir}/cells.bmp`, { as: "bytes" });
+    const image = parseBmp(fromBase64(small.base64));
     if (!image) {
       return null;
     }
     const jpg = await $.fs.read(`${dir}/cover.jpg`, { as: "bytes" });
     const png = canImages ? await $.fs.read(`${dir}/cover.png`, { as: "bytes" }) : { base64: "" };
     const found = palette(image.rgba);
-    const words = halfBlockCells(image.rgba, image.width, image.height, COVER_COLUMNS, COVER_ROWS);
-    return { png: png.base64, jpg: jpg.base64, cells: encodeCells(words), colors: found.colors, accent: found.accent };
+    // The pixels are kept, and cut to cells when drawn, since the cover's size follows the room.
+    return { png: png.base64, jpg: jpg.base64, thumb: image, colors: found.colors, accent: found.accent };
   } catch {
     return null;
   }
 }
 
+// The cover as cells at the size asked for, made once per size.
+function coverCells(geo) {
+  const key = `${geo.cover}x${geo.rows}`;
+  if (cover.cellsKey !== key) {
+    cover.cellsKey = key;
+    const words = cover.thumb
+      ? quadrantCells(cover.thumb.rgba, cover.thumb.width, cover.thumb.height, geo.cover, geo.rows)
+      : placeholderCells(geo.cover, geo.rows, cover.colors);
+    cover.cells = encodeCells(words);
+  }
+  return cover.cells;
+}
+
 // The aurora moves while the terminal panel is on screen and the song plays: one Raster
-// repainted about ten times a second with $.ui.blit, never the whole tree. It stops when the
+// repainted about eight times a second with $.ui.blit, never the whole tree. It stops when the
 // music is paused or stepped down, the panel is replaced, or the band has not been drawn for a while.
 function auroraTime() {
   return (now() - EPOCH) / 1000;
@@ -1050,6 +1072,26 @@ function stopAurora() {
     auroraTimer = null;
   }
   auroraMisses = 0;
+}
+
+// The next lyric line is drawn the moment it starts, not at the next poll: when it is due within
+// the next second and a bit, the tree is drawn again then.
+function scheduleLine($, view) {
+  stopLine();
+  if (view.state !== "playing" || typeof view.nextIn !== "number" || view.nextIn > 1.4) {
+    return;
+  }
+  lineTimer = $.clock.after(Math.max(30, Math.round(view.nextIn * 1000) + 30), () => {
+    lineTimer = null;
+    $.ui.invalidate("ui.render");
+  });
+}
+
+function stopLine() {
+  if (lineTimer) {
+    lineTimer.cancel();
+    lineTimer = null;
+  }
 }
 
 async function auroraFrame($) {
@@ -1114,29 +1156,44 @@ function glowLevel(song) {
   return song.state === "paused" ? 0.45 : 1;
 }
 
-function timeLabel(song) {
-  return song.dur > 0 ? `${clock(song.pos)} / ${clock(song.dur)}` : clock(song.pos);
+// The colours the panel's words and bar take from the cover: the two strongest colours, lifted
+// to read on the dark background (and let down when the music is quiet), and a deep one for the
+// play button, dark enough for white words.
+function look(quiet) {
+  const fade = (rgb) => (quiet ? mix(rgb, PANEL_BG, 0.5).map(Math.round) : rgb.map(Math.round));
+  return {
+    from: fade(tone(cover.colors[0], 0.58, 0.5)),
+    to: fade(tone(cover.colors[1], 0.68, 0.5)),
+    pill: fade(pillColor(cover.colors[0])),
+  };
 }
 
 // Prev, play or pause, next, then the volume (when focused and there is room) and DJ Clawd.
-// `room` is how many cells the row has. DJ Clawd stays in big mode, at the end of this row.
-function controlsRow($, ui, song, columns, room) {
+// `room` is how many cells the row has. The play button is a pill in the cover's colour, the
+// others plain words, so the main action reads at a glance. DJ Clawd stays in big mode, at the
+// end of this row.
+function controlsRow($, ui, song, columns, room, tint) {
   const { Box, Text, Button } = ui;
   const lit = isLit;
+  const playing = song.state !== "paused";
   const parts = [
-    Button({ key: "prev", label: "‹ prev", ...keyed("h"), dimColor: !lit, onPress: () => void press($, "prev") }),
-    Text({ children: "  " }),
-    Button({
-      key: "play",
-      label: song.state === "paused" ? "play" : "pause",
-      ...keyed("p"),
-      autoFocus: true,
-      onPress: () => void press($, "pause"),
+    Button({ key: "prev", label: "‹ prev", ...keyed("h"), plain: true, dimColor: !lit, onPress: () => void press($, "prev") }),
+    Text({ children: "   " }),
+    Box({
+      backgroundColor: hex(tint.pill),
+      children: Button({
+        key: "play",
+        label: playing ? "  pause  " : "   play  ",
+        ...keyed("p"),
+        plain: true,
+        autoFocus: true,
+        onPress: () => void press($, "pause"),
+      }),
     }),
-    Text({ children: "  " }),
-    Button({ key: "next", label: "next ›", ...keyed("l"), dimColor: !lit, onPress: () => void press($, "next") }),
+    Text({ children: "   " }),
+    Button({ key: "next", label: "next ›", ...keyed("l"), plain: true, dimColor: !lit, onPress: () => void press($, "next") }),
   ];
-  let left = room - 33;
+  let left = room - 27;
   if (lit && left >= 16) {
     parts.push(Text({ children: "  " }));
     parts.push(Button({ key: "down", label: "-", hotkey: "j", plain: true, onPress: () => void press($, "down") }));
@@ -1144,89 +1201,144 @@ function controlsRow($, ui, song, columns, room) {
     parts.push(Button({ key: "up", label: "+", hotkey: "k", plain: true, onPress: () => void press($, "up") }));
     left -= 16;
   }
-  if (clawdOn && columns >= 84 && song.state === "playing" && left >= CLAWD_ZONE + 2) {
+  if (clawdOn && columns >= 72 && song.state === "playing" && left >= CLAWD_ZONE + 2) {
     parts.push(Text({ children: " ".repeat(Math.max(1, walk + 1)) }));
     parts.push(Text({ color: CLAWD_COLOR, children: clawdFace() }));
   }
   return Box({ flexDirection: "row", children: parts });
 }
 
-function progressRow(ui, song, cells, accent, quiet) {
+// Elapsed time, a bar to eighths of a cell filled in a gradient of the cover's two strongest
+// colours over a dim track, and the length. Both times are as wide as the length, so
+// nothing moves when the minutes roll over. `cells` is the whole row's width.
+function progressRow(ui, song, cells, tint, quiet) {
   const { Box, Text } = ui;
-  const bar = progressBar(song.pos, song.dur, cells);
-  return Box({
-    flexDirection: "row",
-    children: [
-      Text({ color: accent, dimColor: quiet, children: "━".repeat(bar.filled) }),
-      Text({ color: BONE_DIM, children: "─".repeat(bar.empty) }),
-      Text({ color: BONE_DIM, children: `  ${timeLabel(song)}` }),
-    ],
-  });
+  const labels = timeLabels(song.pos, song.dur);
+  const bar = Math.max(6, cells - labels.elapsed.length - labels.total.length - (labels.total ? 2 : 1));
+  const parts = [Text({ color: quiet ? BONE_DIM : BONE_SOFT, children: `${labels.elapsed} ` })];
+  for (const run of progressRuns(song.pos, song.dur, bar, tint.from, tint.to)) {
+    parts.push(
+      run.track
+        ? Text({ color: hex(run.color), backgroundColor: hex(TRACK), children: run.text })
+        : Text({ color: hex(run.color), children: run.text }),
+    );
+  }
+  if (labels.total) {
+    parts.push(Text({ color: BONE_DIM, children: ` ${labels.total}` }));
+  }
+  return Box({ flexDirection: "row", children: parts });
+}
+
+// The two lines under the artist: the lyric being sung over the next one (a karaoke preview),
+// or, for a song without synced lyrics, its album over what is up next, so no row is empty.
+function captionRows(ui, song, cells, accent, quiet) {
+  const { Text, Box } = ui;
+  const c = captionLines(song);
+  const row = (line, now) => {
+    if (line.role === "now") {
+      return Text({ color: accent, bold: true, dimColor: quiet, wrap: "truncate-end", children: line.text });
+    }
+    if (line.role === "next") {
+      return Text({ color: BONE_DIM, wrap: "truncate-end", children: line.text });
+    }
+    if (line.role === "queue") {
+      const label = `${line.label}  `;
+      return Box({
+        flexDirection: "row",
+        children: [
+          Text({ color: BONE_DIM, children: label }),
+          Text({ color: BONE_SOFT, dimColor: quiet, wrap: "truncate-end", children: fit(line.text, Math.max(4, cells - label.length)) }),
+        ],
+      });
+    }
+    return Text({ color: line.role === "album" ? BONE_SOFT : BONE_DIM, italic: true, dimColor: quiet && line.role === "album", wrap: "truncate-end", children: line.text });
+  };
+  return [row(c.first), row(c.second)];
+}
+
+// Artist, and the album after it in a dimmer colour when it fits.
+function identityRow(ui, song, cells, quiet) {
+  const { Box, Text } = ui;
+  const artist = fit(song.artist || " ", cells);
+  const parts = [Text({ color: BONE_SOFT, dimColor: quiet, wrap: "truncate-end", children: artist })];
+  const room = cells - artist.length - 3;
+  if (song.hasLyrics && song.album && room >= 8) {
+    parts.push(Text({ color: BONE_DIM, children: ` · ${fit(song.album, room)}` }));
+  }
+  return Box({ flexDirection: "row", children: parts });
 }
 
 function hintRow(ui) {
   return ui.Text({ color: BONE_DIM, children: " p pause · h l song · j k volume · esc back to the prompt" });
 }
 
-// Terminal: the cover on the left (a picture where the terminal shows one, else half-block
-// cells), and on the right an aurora Raster over the title, artist, lyric, progress and buttons.
+// Terminal: the cover on the left (a picture where the terminal shows one, else quadrant cell
+// art), and on the right a ribbon of aurora over the title, artist, two caption lines,
+// progress and buttons. Everything sits on one grid: the left edge of the words is the
+// left edge of the ribbon, and the right edge of the bar is the right edge of the ribbon.
 function terminalPanel($, ui, e, layout, song, columns) {
   const { Box, Text, Raster, Image } = ui;
-  const w = panelWidths(columns);
+  const geo = panelGeometry(columns, e.props.maxRows ?? 0);
   const quiet = isDucked() || song.state === "paused";
   const accent = hex(cover.accent);
-  panelSite = { requestId: e.requestId, columns: w.text, rows: RIBBON_ROWS, at: now() };
+  const tint = look(quiet);
+  panelSite = { requestId: e.requestId, columns: geo.text, rows: geo.ribbon, at: now() };
   syncAurora($);
   if (layout.cover === "image" && cover.png && probed !== cover.key) {
     probed = cover.key;
     probeImage($, e.requestId, cover.png, cover.key, 0);
   }
-  const glow = encodeCells(auroraCells(w.text, RIBBON_ROWS, auroraTime(), cover.colors, glowLevel(song)));
-  if (!cover.cells && !cover.filler) {
-    cover.filler = encodeCells(placeholderCells(COVER_COLUMNS, COVER_ROWS, cover.colors));
-  }
+  const glow = encodeCells(auroraCells(geo.text, geo.ribbon, auroraTime(), cover.colors, glowLevel(song)));
   const art =
     layout.cover === "image" && cover.png
-      ? Image({ key: "cover", source: { png: cover.png }, columns: COVER_COLUMNS, rows: COVER_ROWS, alt: "cover" })
-      : Raster({ key: "cover", columns: COVER_COLUMNS, rows: COVER_ROWS, cells: cover.cells || cover.filler });
+      ? Image({ key: "cover", source: { png: cover.png }, columns: geo.cover, rows: geo.rows, alt: "cover" })
+      : Raster({ key: "cover", columns: geo.cover, rows: geo.rows, cells: coverCells(geo) });
+  const [first, second] = captionRows(ui, song, geo.text, accent, quiet);
   const text = Box({
     flexDirection: "column",
-    width: w.text,
+    width: geo.text,
+    flexShrink: 0,
     children: [
-      Raster({ key: "aurora", columns: w.text, rows: RIBBON_ROWS, cells: glow }),
+      Raster({ key: "aurora", columns: geo.text, rows: geo.ribbon, cells: glow }),
       Text({ bold: true, color: BONE, dimColor: quiet, wrap: "truncate-end", children: song.title }),
-      Text({ color: BONE_SOFT, dimColor: quiet, wrap: "truncate-end", children: song.artist || " " }),
-      Text({ children: " " }),
-      Text({ color: accent, dimColor: quiet, italic: true, wrap: "truncate-end", children: song.line || " " }),
-      progressRow(ui, song, w.bar, accent, quiet),
-      controlsRow($, ui, song, columns, w.text),
+      identityRow(ui, song, geo.text, quiet),
+      ...(geo.gapA ? [Text({ children: " " })] : []),
+      first,
+      second,
+      ...(geo.gapB ? [Text({ children: " " })] : []),
+      progressRow(ui, song, geo.text, tint, quiet),
+      controlsRow($, ui, song, columns, geo.text, tint),
     ],
   });
   const body = Box({
     flexDirection: "row",
-    gap: PANEL_GAP,
-    children: [Box({ width: COVER_COLUMNS, height: COVER_ROWS, flexShrink: 0, children: art }), text],
+    gap: geo.gap,
+    children: [Box({ width: geo.cover, height: geo.rows, flexShrink: 0, children: art }), text],
   });
   return Box({
     flexDirection: "column",
-    backgroundColor: BACKGROUND_HEX,
+    backgroundColor: PANEL_BG_HEX,
     paddingX: PANEL_PAD,
+    paddingY: geo.pad,
     children: isLit ? [body, hintRow(ui)] : [body],
   });
 }
 
-// Desktop: one Svg with the cover on a drifting glow, with the title and artist. It holds
-// nothing that changes each second, so its source stays the same while the song plays and
-// the animation is not restarted. The lyric line, progress and buttons are native elements.
+// Desktop: one Svg with the cover on a haze of its own colours, with the title, artist and
+// album. It holds nothing that changes each second, so its source stays the same while the
+// song plays and the animation is not restarted. The lyric lines (or album and what is up
+// next), progress and buttons are native elements under it.
 function desktopPanel($, ui, song, columns) {
   const { Box, Text, Svg } = ui;
   const ducked = isDucked();
   const quiet = ducked || song.state === "paused";
   const accent = hex(cover.accent);
+  const tint = look(quiet);
   const picture = Svg({
     source: panelSvg({
       title: song.title,
       artist: song.artist,
+      album: song.album,
       colors: cover.colors,
       accent: cover.accent,
       jpeg: cover.jpg,
@@ -1236,7 +1348,8 @@ function desktopPanel($, ui, song, columns) {
     alt: song.artist ? `${song.title} by ${song.artist}` : song.title,
     isInteractive: true,
   });
-  const cells = Math.max(12, Math.min(60, columns - 24));
+  const cells = Math.max(24, Math.min(64, columns - 8));
+  const [first, second] = captionRows(ui, song, cells, accent, quiet);
   return Box({
     flexDirection: "column",
     backgroundColor: BACKGROUND_HEX,
@@ -1248,10 +1361,12 @@ function desktopPanel($, ui, song, columns) {
         paddingX: 2,
         paddingTop: 1,
         children: [
-          Text({ color: accent, dimColor: quiet, italic: true, wrap: "truncate-end", children: song.line || " " }),
-          progressRow(ui, song, cells, accent, quiet),
+          first,
+          second,
           Text({ children: " " }),
-          controlsRow($, ui, song, columns, columns - 4),
+          progressRow(ui, song, cells, tint, quiet),
+          Text({ children: " " }),
+          controlsRow($, ui, song, columns, cells, tint),
           ...(isLit ? [hintRow(ui)] : []),
         ],
       }),
