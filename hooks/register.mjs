@@ -12,12 +12,50 @@
 //   /music lofi | jazz | chill | classical | nature | radio
 //   /music vol 40
 //   /music clawd               show or hide DJ Clawd
+//   /music big                 toggle the big panel (cover, aurora, lyric line) for songs
 //
 // When Claude asks a permission question the music steps down and Clawd lifts one
 // headphone cup. Both come back when the question is answered. The host reads
 // on(...) and $.noun.method(...) from source, so they are written out in full.
+//
+// The big panel (hooks/panel.mjs holds its pure parts) draws the cover, an aurora in the
+// cover's colours, the title, artist, lyric line, progress and buttons while a song plays
+// through hum. The terminal gets cells and a picture where it can show one, the desktop a
+// single SVG. Radio keeps the one-line band.
 
 import { clamp, duckCommand, humView, livePosition, parseArgs, route, VOLUME_STEP } from "./logic.mjs";
+import {
+  auroraCells,
+  BACKGROUND_HEX,
+  BONE,
+  BONE_DIM,
+  BONE_SOFT,
+  canShowImages,
+  chooseLayout,
+  clock,
+  COVER_COLUMNS,
+  COVER_KEEP,
+  COVER_ROWS,
+  COVER_SCRIPT,
+  coverKey,
+  coverUrls,
+  encodeCells,
+  FALLBACK_ACCENT,
+  FALLBACK_COLORS,
+  fit,
+  fromBase64,
+  halfBlockCells,
+  hex,
+  PANEL_GAP,
+  PANEL_PAD,
+  palette,
+  panelSvg,
+  panelWidths,
+  parseBmp,
+  placeholderCells,
+  progressBar,
+  RIBBON_ROWS,
+} from "./panel.mjs";
 
 const STATIONS = [
   { id: "lofi", name: "lofi", color: "#d97757", url: "https://radio.nia.nc/radio/8020/lofi-hq-stream.aac" },
@@ -42,6 +80,12 @@ const BAR_CELLS = 10;
 const COLLAPSE_CELLS = 4;
 const MAX_COLUMNS = 100;
 const CLAWD_ZONE = 12;
+const AURORA_MS = 125;
+const AURORA_MISSES = 20;
+const AURORA_STALE_MS = 4000;
+const COVER_MS = 30000;
+const PROBE_MS = 1500;
+const EPOCH = Date.now();
 const SESSION = Math.random().toString(36).slice(2, 8);
 
 // What the radio helper last said: { state, station, title, volume, ducked, pos, dur }.
@@ -60,6 +104,16 @@ let timerMs = 0;
 let failures = 0;
 let isLit = false;
 let clawdOn = true;
+let big = false;
+let canImages = false;
+let cover = emptyCover("");
+let panelSite = null;
+let auroraTimer = null;
+let auroraBusy = false;
+let auroraMisses = 0;
+let auroraBlocked = "";
+let imagesBlocked = false;
+let probed = "";
 let walk = CLAWD_ZONE - 7;
 let nod = false;
 
@@ -86,6 +140,19 @@ export function register(on) {
     if (typeof clawd === "boolean") {
       clawdOn = clawd;
     }
+    const wide = await $.store.get("big").catch(() => undefined);
+    if (typeof wide === "boolean") {
+      big = wide;
+    }
+    const term = {
+      TERM_PROGRAM: (await $.env.get("TERM_PROGRAM").catch(() => undefined)) ?? "",
+      TERM: (await $.env.get("TERM").catch(() => undefined)) ?? "",
+      KITTY_WINDOW_ID: (await $.env.get("KITTY_WINDOW_ID").catch(() => undefined)) ?? "",
+      GHOSTTY_RESOURCES_DIR: (await $.env.get("GHOSTTY_RESOURCES_DIR").catch(() => undefined)) ?? "",
+      TMUX: (await $.env.get("TMUX").catch(() => undefined)) ?? "",
+      HUSH_COVER: (await $.env.get("HUSH_COVER").catch(() => undefined)) ?? "",
+    };
+    canImages = canShowImages(term);
     const running = await ask($, "status");
     if (running && (running.state === "playing" || running.state === "loading" || running.state === "paused")) {
       adopt(running);
@@ -180,11 +247,27 @@ export function register(on) {
 
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey || !isActive()) {
+      leavePanel($, e);
       return next(e);
     }
     const ui = $.ui.resolve(e);
-    const columns = Math.min((e.props.bodyColumns ?? 80) - COLLAPSE_CELLS, MAX_COLUMNS);
+    const width = e.props.bodyColumns ?? 80;
+    const columns = Math.min(width - COLLAPSE_CELLS, MAX_COLUMNS);
+    const song = source === "hum" && finding === "" ? humView(hum, now()) : null;
+    const layout = chooseLayout({
+      big,
+      isSong: song !== null,
+      surface: e.surface,
+      columns: width,
+      rows: e.props.maxRows ?? 0,
+      canImages: canImages && !imagesBlocked,
+    });
     const beneath = await next(e);
+    if (layout.mode === "panel") {
+      const drawn = e.surface === "desktop" ? desktopPanel($, ui, song, columns) : terminalPanel($, ui, e, layout, song, columns);
+      return ui.Box({ flexDirection: "column", children: [drawn, beneath] });
+    }
+    leavePanel($, e);
     return ui.Box({ flexDirection: "column", children: [band($, ui, columns), beneath] });
   });
 
@@ -377,6 +460,7 @@ async function playOnHum($, cmd) {
     hum = (await humState($)) ?? hum;
     watch($);
     cue($);
+    wantCover($);
     return reply.text || `Playing ${cmd.query} in hum`;
   } finally {
     finding = "";
@@ -410,6 +494,8 @@ async function leaveHum($) {
 
 function dropHum() {
   stopTimer();
+  stopAurora();
+  cover = emptyCover("");
   source = "radio";
   hum = null;
   humDucked = false;
@@ -445,6 +531,8 @@ async function pollHum($) {
     if (!before || before.title !== view.title) {
       cue($);
     }
+    wantCover($);
+    syncAurora($);
     const seen = [view.name, view.line, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
     if (seen !== humSeen) {
       humSeen = seen;
@@ -477,6 +565,21 @@ async function perform($, intent) {
   }
   if (plan.target === "radio") {
     return performRadio($, plan);
+  }
+  if (plan.action === "big") {
+    big = !big;
+    await $.store.set("big", big).catch(() => undefined);
+    if (big) {
+      wantCover($);
+    } else {
+      panelSite = null;
+      auroraBlocked = "";
+      stopAurora();
+    }
+    $.ui.invalidate("ui.render");
+    return big
+      ? "Big panel on. Songs through hum get it; radio keeps its band"
+      : "Big panel off. Back to the one-line band";
   }
   clawdOn = !clawdOn;
   await $.store.set("clawd", clawdOn).catch(() => undefined);
@@ -514,6 +617,7 @@ async function performHum($, plan) {
   }
   const playing = plan.cmd.cmd === "resume" || (plan.cmd.cmd === "toggle" && hum && !hum.playing);
   hum = { ...hum, playing, position: livePosition(hum, now()), at: now() };
+  syncAurora($);
   $.ui.invalidate("ui.render");
   return playing ? "Playing" : "Paused";
 }
@@ -594,6 +698,10 @@ async function duck($, wanted) {
       return;
     }
     humDucked = wanted;
+    if (hum) {
+      hum = { ...hum, ducked: wanted };
+    }
+    syncAurora($);
     $.ui.invalidate("ui.render");
     await humSend($, body);
     return;
@@ -708,23 +816,9 @@ function cue($) {
 
 // ---------- drawing ----------
 
-function fit(text, cells) {
-  if (cells <= 0) {
-    return "";
-  }
-  return text.length <= cells ? text : `${text.slice(0, Math.max(0, cells - 1))}…`;
-}
-
 // A hotkey makes the engine draw a "h:" prefix, so only the focused band carries them.
 function keyed(letter) {
   return isLit ? { hotkey: letter } : {};
-}
-
-function clock(total) {
-  const seconds = Math.floor(total);
-  const m = Math.floor(seconds / 60);
-  const s = String(seconds % 60).padStart(2, "0");
-  return `${m}:${s}`;
 }
 
 // DJ Clawd: the banner mascot's head with headphones. One cup lifts when you are being asked something.
@@ -842,6 +936,305 @@ function band($, ui, columns) {
       : ` p pause · h l ${isSong ? "song" : "station"} · esc back to the prompt`,
   });
   return Box({ flexDirection: "column", children: [row, hint] });
+}
+
+// ---------- big panel ----------
+
+function emptyCover(key) {
+  return { key, state: "none", png: "", jpg: "", cells: "", colors: FALLBACK_COLORS, accent: FALLBACK_ACCENT, filler: "" };
+}
+
+// Starts reading the cover of the song that plays, when the big panel is on and it is a new song.
+// The work runs in the background; the panel draws a stand-in until the cover is ready.
+function wantCover($) {
+  if (!big || source !== "hum" || !hum || !hum.track) {
+    return;
+  }
+  const key = coverKey(hum.track);
+  if (cover.key === key) {
+    return;
+  }
+  cover = emptyCover(key);
+  void loadCover($, key, hum.track);
+}
+
+// Downloads the cover and makes its files with sips (see COVER_SCRIPT), then reads them.
+async function loadCover($, key, track) {
+  const home = await $.env.get("HOME").catch(() => undefined);
+  const urls = coverUrls(track);
+  let found = null;
+  if (home && urls.length > 0) {
+    const root = `${home}/.claude/hush/art`;
+    const dir = `${root}/${key}`;
+    const run = await $.process
+      .run(["/bin/sh", "-c", COVER_SCRIPT, "sh", dir, root, String(COVER_KEEP), ...urls], { timeoutMs: COVER_MS })
+      .catch(() => ({ exitCode: 1 }));
+    if (run.exitCode === 0) {
+      found = await readCover($, dir);
+    }
+  }
+  if (cover.key !== key) {
+    return;
+  }
+  cover = found ? { ...emptyCover(key), ...found, state: "ready" } : emptyCover(key);
+  $.ui.invalidate("ui.render");
+}
+
+async function readCover($, dir) {
+  try {
+    const thumb = await $.fs.read(`${dir}/thumb.bmp`, { as: "bytes" });
+    const image = parseBmp(fromBase64(thumb.base64));
+    if (!image) {
+      return null;
+    }
+    const jpg = await $.fs.read(`${dir}/cover.jpg`, { as: "bytes" });
+    const png = canImages ? await $.fs.read(`${dir}/cover.png`, { as: "bytes" }) : { base64: "" };
+    const found = palette(image.rgba);
+    const words = halfBlockCells(image.rgba, image.width, image.height, COVER_COLUMNS, COVER_ROWS);
+    return { png: png.base64, jpg: jpg.base64, cells: encodeCells(words), colors: found.colors, accent: found.accent };
+  } catch {
+    return null;
+  }
+}
+
+// The aurora moves while the terminal panel is on screen and the song plays: one Raster
+// repainted about ten times a second with $.ui.blit, never the whole tree. It stops when the
+// music is paused or stepped down, the panel is replaced, or the band has not been drawn for a while.
+function auroraTime() {
+  return (now() - EPOCH) / 1000;
+}
+
+function syncAurora($) {
+  const wanted = panelSite !== null && siteKey(panelSite) !== auroraBlocked && source === "hum" && isPlaying() && !isDucked();
+  if (!wanted) {
+    stopAurora();
+    return;
+  }
+  if (!auroraTimer) {
+    auroraTimer = $.clock.every(AURORA_MS, () => {
+      void auroraFrame($);
+    });
+  }
+}
+
+// A surface that keeps refusing the blits is left alone until the panel is drawn again from scratch.
+function siteKey(site) {
+  return `${site.requestId}:${site.columns}x${site.rows}`;
+}
+
+function stopAurora() {
+  if (auroraTimer) {
+    auroraTimer.cancel();
+    auroraTimer = null;
+  }
+  auroraMisses = 0;
+}
+
+async function auroraFrame($) {
+  const site = panelSite;
+  if (auroraBusy) {
+    return;
+  }
+  if (!site || now() - site.at > AURORA_STALE_MS) {
+    stopAurora();
+    return;
+  }
+  auroraBusy = true;
+  try {
+    const cells = encodeCells(auroraCells(site.columns, site.rows, auroraTime(), cover.colors, 1));
+    const result = await $.ui.blit({ requestId: site.requestId, key: "aurora", cells, columns: site.columns, rows: site.rows });
+    auroraMisses = result && result.deny ? auroraMisses + 1 : 0;
+  } catch {
+    auroraMisses += 1;
+  } finally {
+    auroraBusy = false;
+  }
+  if (auroraMisses >= AURORA_MISSES) {
+    auroraBlocked = siteKey(site);
+    stopAurora();
+  }
+}
+
+// The terminal's name in the environment is only a hint: the engine decides whether it really
+// draws pictures, and a blit is refused when it draws the alt instead. When that stays so, the
+// cover is drawn as cell art. The first look comes after the terminal has had time to answer.
+function probeImage($, requestId, png, key, attempt) {
+  $.clock.after(attempt === 0 ? PROBE_MS : PROBE_MS * 2, async () => {
+    if (cover.key !== key || panelSite === null) {
+      return;
+    }
+    const result = await $.ui.blit({ requestId, key: "cover", source: { png } }).catch(() => undefined);
+    if (!result || !result.deny || !result.deny.includes("alt")) {
+      return;
+    }
+    if (attempt === 0) {
+      probeImage($, requestId, png, key, 1);
+      return;
+    }
+    imagesBlocked = true;
+    $.ui.invalidate("ui.render");
+  });
+}
+
+// The panel is not drawn (band, survey or nothing playing): the aurora has nothing to paint.
+function leavePanel($, e) {
+  if (e.surface === "terminal") {
+    panelSite = null;
+    auroraBlocked = "";
+    stopAurora();
+  }
+}
+
+function glowLevel(song) {
+  if (isDucked()) {
+    return 0.3;
+  }
+  return song.state === "paused" ? 0.45 : 1;
+}
+
+function timeLabel(song) {
+  return song.dur > 0 ? `${clock(song.pos)} / ${clock(song.dur)}` : clock(song.pos);
+}
+
+// Prev, play or pause, next, then the volume (when focused and there is room) and DJ Clawd.
+// `room` is how many cells the row has. DJ Clawd stays in big mode, at the end of this row.
+function controlsRow($, ui, song, columns, room) {
+  const { Box, Text, Button } = ui;
+  const lit = isLit;
+  const parts = [
+    Button({ key: "prev", label: "‹ prev", ...keyed("h"), dimColor: !lit, onPress: () => void press($, "prev") }),
+    Text({ children: "  " }),
+    Button({
+      key: "play",
+      label: song.state === "paused" ? "play" : "pause",
+      ...keyed("p"),
+      autoFocus: true,
+      onPress: () => void press($, "pause"),
+    }),
+    Text({ children: "  " }),
+    Button({ key: "next", label: "next ›", ...keyed("l"), dimColor: !lit, onPress: () => void press($, "next") }),
+  ];
+  let left = room - 33;
+  if (lit && left >= 16) {
+    parts.push(Text({ children: "  " }));
+    parts.push(Button({ key: "down", label: "-", hotkey: "j", plain: true, onPress: () => void press($, "down") }));
+    parts.push(Text({ color: BONE_DIM, children: ` vol ${song.volume} ` }));
+    parts.push(Button({ key: "up", label: "+", hotkey: "k", plain: true, onPress: () => void press($, "up") }));
+    left -= 16;
+  }
+  if (clawdOn && columns >= 84 && song.state === "playing" && left >= CLAWD_ZONE + 2) {
+    parts.push(Text({ children: " ".repeat(Math.max(1, walk + 1)) }));
+    parts.push(Text({ color: CLAWD_COLOR, children: clawdFace() }));
+  }
+  return Box({ flexDirection: "row", children: parts });
+}
+
+function progressRow(ui, song, cells, accent, quiet) {
+  const { Box, Text } = ui;
+  const bar = progressBar(song.pos, song.dur, cells);
+  return Box({
+    flexDirection: "row",
+    children: [
+      Text({ color: accent, dimColor: quiet, children: "━".repeat(bar.filled) }),
+      Text({ color: BONE_DIM, children: "─".repeat(bar.empty) }),
+      Text({ color: BONE_DIM, children: `  ${timeLabel(song)}` }),
+    ],
+  });
+}
+
+function hintRow(ui) {
+  return ui.Text({ color: BONE_DIM, children: " p pause · h l song · j k volume · esc back to the prompt" });
+}
+
+// Terminal: the cover on the left (a picture where the terminal shows one, else half-block
+// cells), and on the right an aurora Raster over the title, artist, lyric, progress and buttons.
+function terminalPanel($, ui, e, layout, song, columns) {
+  const { Box, Text, Raster, Image } = ui;
+  const w = panelWidths(columns);
+  const quiet = isDucked() || song.state === "paused";
+  const accent = hex(cover.accent);
+  panelSite = { requestId: e.requestId, columns: w.text, rows: RIBBON_ROWS, at: now() };
+  syncAurora($);
+  if (layout.cover === "image" && cover.png && probed !== cover.key) {
+    probed = cover.key;
+    probeImage($, e.requestId, cover.png, cover.key, 0);
+  }
+  const glow = encodeCells(auroraCells(w.text, RIBBON_ROWS, auroraTime(), cover.colors, glowLevel(song)));
+  if (!cover.cells && !cover.filler) {
+    cover.filler = encodeCells(placeholderCells(COVER_COLUMNS, COVER_ROWS, cover.colors));
+  }
+  const art =
+    layout.cover === "image" && cover.png
+      ? Image({ key: "cover", source: { png: cover.png }, columns: COVER_COLUMNS, rows: COVER_ROWS, alt: "cover" })
+      : Raster({ key: "cover", columns: COVER_COLUMNS, rows: COVER_ROWS, cells: cover.cells || cover.filler });
+  const text = Box({
+    flexDirection: "column",
+    width: w.text,
+    children: [
+      Raster({ key: "aurora", columns: w.text, rows: RIBBON_ROWS, cells: glow }),
+      Text({ bold: true, color: BONE, dimColor: quiet, wrap: "truncate-end", children: song.title }),
+      Text({ color: BONE_SOFT, dimColor: quiet, wrap: "truncate-end", children: song.artist || " " }),
+      Text({ children: " " }),
+      Text({ color: accent, dimColor: quiet, italic: true, wrap: "truncate-end", children: song.line || " " }),
+      progressRow(ui, song, w.bar, accent, quiet),
+      controlsRow($, ui, song, columns, w.text),
+    ],
+  });
+  const body = Box({
+    flexDirection: "row",
+    gap: PANEL_GAP,
+    children: [Box({ width: COVER_COLUMNS, height: COVER_ROWS, flexShrink: 0, children: art }), text],
+  });
+  return Box({
+    flexDirection: "column",
+    backgroundColor: BACKGROUND_HEX,
+    paddingX: PANEL_PAD,
+    children: isLit ? [body, hintRow(ui)] : [body],
+  });
+}
+
+// Desktop: one Svg with the cover on a drifting glow, with the title and artist. It holds
+// nothing that changes each second, so its source stays the same while the song plays and
+// the animation is not restarted. The lyric line, progress and buttons are native elements.
+function desktopPanel($, ui, song, columns) {
+  const { Box, Text, Svg } = ui;
+  const ducked = isDucked();
+  const quiet = ducked || song.state === "paused";
+  const accent = hex(cover.accent);
+  const picture = Svg({
+    source: panelSvg({
+      title: song.title,
+      artist: song.artist,
+      colors: cover.colors,
+      accent: cover.accent,
+      jpeg: cover.jpg,
+      animated: song.state === "playing" && !ducked,
+      dim: quiet,
+    }),
+    alt: song.artist ? `${song.title} by ${song.artist}` : song.title,
+    isInteractive: true,
+  });
+  const cells = Math.max(12, Math.min(60, columns - 24));
+  return Box({
+    flexDirection: "column",
+    backgroundColor: BACKGROUND_HEX,
+    paddingBottom: 1,
+    children: [
+      picture,
+      Box({
+        flexDirection: "column",
+        paddingX: 2,
+        paddingTop: 1,
+        children: [
+          Text({ color: accent, dimColor: quiet, italic: true, wrap: "truncate-end", children: song.line || " " }),
+          progressRow(ui, song, cells, accent, quiet),
+          Text({ children: " " }),
+          controlsRow($, ui, song, columns, columns - 4),
+          ...(isLit ? [hintRow(ui)] : []),
+        ],
+      }),
+    ],
+  });
 }
 
 async function press($, what) {

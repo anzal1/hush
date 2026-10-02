@@ -18,11 +18,33 @@ question the music steps down, and it comes back when you answer.
     /music frank ocean nights     play any song or artist, through hum
     /music jazz                   back to the radio (also /music radio)
     /music clawd                  show or hide DJ Clawd
+    /music big                    toggle the big panel for songs (see Big mode)
 
 Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station (previous and next song while a song plays),
 `j` `k` volume, `esc` back.
 
 ![The focused band, with controls](docs/band-focused.png)
+
+## Big mode
+
+`/music big` swaps the one-line band for a richer panel while a song plays through hum. Run it again to go back.
+Hush remembers the choice. Radio always keeps its one-line band.
+
+The panel shows the cover, an aurora glow in the cover's colours on hum's dark warm background, the title, the artist,
+the live lyric line, progress with times, and real prev, play or pause and next buttons that call hum.
+DJ Clawd stays: he sits at the end of the buttons row, nods on tool calls and lifts a headphone cup when Claude asks
+you something. When the music steps down the glow dims and holds still.
+
+- Terminal: the cover is a picture where the terminal shows them (kitty, Ghostty), and half-block cell art elsewhere
+  (`HUSH_COVER=cells` or `image` forces one). The aurora is a strip of cells repainted about eight times a second, only
+  while the panel is on screen and the song plays. It is 8 rows tall, and below 60 columns (or without the rows) the
+  one-line band is drawn instead.
+- Desktop (the Code tab in the Claude app): one SVG holds the cover on a glow that drifts by SMIL, with the title and
+  artist. The lyric line, progress and buttons are native elements under it, so the SVG does not change each second and
+  its animation is not restarted. Pausing or a question swaps in a still glow.
+
+The cover comes from hum's art (or YouTube's thumbnail), is downloaded with `curl` and resized with macOS's `sips`,
+and is cached in `~/.claude/hush/art/` (the 40 newest tracks). Nothing new is installed.
 
 ## Install
 
@@ -37,6 +59,7 @@ A mod runs with your full permissions. Read `hooks/register.mjs` and `native/hus
 
 `hooks/register.mjs` is the mod. It talks to `bin/hush` over a unix socket (`~/.claude/hush/h.sock`).
 `hooks/logic.mjs` holds the pure parts: what a `/music` command means for radio or hum, and which lyric line is being sung.
+`hooks/panel.mjs` holds the pure parts of the big panel: reading the cover's BMP, the palette, the half-block cells, the aurora, the SVG and which layout fits.
 The helper quits by itself 90 seconds after the last Claude Code session stops talking to it.
 If `bin/hush` is missing the mod builds it from `native/hush.swift` with `swiftc`. Rebuild with `./build.sh`.
 

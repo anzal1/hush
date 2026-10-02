@@ -3,7 +3,7 @@
 // Hush plays two kinds of audio. Radio goes through the native helper. Songs go through
 // hum (https://github.com/anzal1/hum), which plays through YouTube's own embed in a visible
 // window. This file decides what a /music command means for each, and how hum's state is
-// turned into the line shown above the prompt.
+// turned into the line (or the big panel) shown above the prompt.
 
 export const LYRIC_LEAD = 0.15;
 export const VOLUME_STEP = 10;
@@ -56,6 +56,8 @@ export function humView(state, now) {
     title,
     artist,
     name: artist && artist !== title ? `${title} · ${artist}` : title,
+    id: typeof state.track.id === "string" ? state.track.id : "",
+    art: typeof state.track.art === "string" ? state.track.art : "",
     line: lyricLine(lyrics, pos),
     hasLyrics: lyrics.length > 0,
     pos,
@@ -95,6 +97,9 @@ export function parseArgs(args, stations) {
   }
   if (word === "clawd" && rest.length === 0) {
     return { kind: "clawd" };
+  }
+  if (word === "big" && rest.length === 0) {
+    return { kind: "big" };
   }
   if ((word === "pause" || word === "play") && rest.length === 0) {
     return { kind: word };
