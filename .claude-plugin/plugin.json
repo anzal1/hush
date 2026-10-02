@@ -1,6 +1,6 @@
 {
   "name": "hush",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Free internet radio and any song in one quiet line above the prompt, with a DJ Clawd. The music steps down when Claude asks you a question. No account, no setup. macOS.",
   "author": {
     "name": "Anzal"

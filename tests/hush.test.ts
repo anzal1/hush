@@ -46,7 +46,7 @@ async function boot($: any, on: any) {
   on('env.get', () => ({ value: '/home/test' }))
   on('command.register', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: '/work' }))
-  on('classic.PermissionRequest', () => ({}))
+  on('tool.check', () => ({ decision: 'ask' }))
   on('classic.PostToolUse', () => ({}))
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
   const clock = mock.clock(on)
@@ -76,7 +76,7 @@ test('/music next moves to the following station and wraps', async ($, on) => {
 test('the music ducks on a permission question and returns after the answer', async ($, on) => {
   const { helper } = await boot($, on)
   await $.command.run({ command: 'music', args: 'jazz' })
-  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm publish' } })
+  await $.tool.check({ tool: 'Bash', command: 'npm publish' })
   expect(helper.ducked).toBe(true)
   await $.classic.PostToolUse({ tool_name: 'Bash', tool_input: {}, tool_response: {} })
   expect(helper.ducked).toBe(false)
@@ -84,7 +84,7 @@ test('the music ducks on a permission question and returns after the answer', as
 
 test('nothing is drawn while nothing plays, and no helper call is made for a duck', async ($, on) => {
   const { helper } = await boot($, on)
-  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: {} })
+  await $.tool.check({ tool: 'Bash', command: 'ls' })
   expect(helper.sent.some((c: string) => c.startsWith('duck'))).toBe(false)
   const ui = await $.ui.mount(PROMPT(100))
   expect(await ui.find({ type: 'Text', text: /Nights/ })).toBeUndefined()

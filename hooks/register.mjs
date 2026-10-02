@@ -85,9 +85,14 @@ export function register(on) {
     return { text };
   });
 
-  on("classic.PermissionRequest", async ($, e, next) => {
-    await duck($, true);
-    return next(e);
+  // Claude Code's own guard hides classic.PermissionRequest from installed mods, so the
+  // question is caught here instead: the verdict "ask" means a dialog is about to open.
+  on("tool.check", async ($, e, next) => {
+    const verdict = await next(e);
+    if (verdict && verdict.decision === "ask") {
+      await duck($, true);
+    }
+    return verdict;
   });
 
   on("tool.call", { tool: "AskUserQuestion" }, async ($, e, next) => {
@@ -104,6 +109,24 @@ export function register(on) {
         $.ui.invalidate("ui.render");
       });
     }
+    return next(e);
+  });
+
+  // The classic.* events are hidden from installed mods when an organization guard is loaded, so
+  // the music comes back on events that are not: a tool result being recorded, a turn ending, or
+  // a new prompt.
+  on("session.append", { door: "tool-result" }, async ($, e, next) => {
+    await duck($, false);
+    return next(e);
+  });
+
+  on("turn.complete", async ($, e, next) => {
+    await duck($, false);
+    return next(e);
+  });
+
+  on("prompt.submit", async ($, e, next) => {
+    await duck($, false);
     return next(e);
   });
 

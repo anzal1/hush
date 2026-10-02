@@ -37,8 +37,9 @@ A mod runs with your full permissions. Read `hooks/register.mjs` and `native/hus
 The helper quits by itself 90 seconds after the last Claude Code session stops talking to it.
 If `bin/hush` is missing the mod builds it from `native/hush.swift` with `swiftc`. Rebuild with `./build.sh`.
 
-Ducking listens for Claude's permission request and `AskUserQuestion` events, and restores on the
-next tool result, denial, stop or prompt.
+Ducking listens for `tool.check` (a verdict of "ask") and `AskUserQuestion`, and restores when the tool result
+is recorded, the turn ends, or you submit a prompt. Claude Code's built-in guard hides the `classic.*` events from
+installed mods, so Hush does not rely on them.
 
 ## Stations
 
