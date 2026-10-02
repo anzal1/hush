@@ -390,6 +390,18 @@ async function humSend($, body, ms = HUM_STATE_MS) {
   return humFetch($, "/api/remote", init, ms);
 }
 
+// Puts npx on PATH however Node was installed. A mod's shell does not load the person's shell
+// setup, so a Node that only nvm, Volta, fnm, mise or asdf knows about is otherwise invisible;
+// the last resort asks the person's own login shell where npx is.
+const FIND_NODE = [
+  'H="${HOME:-$(cd ~ && pwd)}";',
+  'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$H/.volta/bin:$H/.local/share/mise/shims:$H/.asdf/shims";',
+  'd=$(ls -1d "$H"/.nvm/versions/node/*/bin "$H"/.local/share/fnm/node-versions/*/installation/bin "$H/Library/Application Support/fnm/node-versions"/*/installation/bin 2>/dev/null | sort -r | while IFS= read -r x; do [ -x "$x/npx" ] && { echo "$x"; break; }; done);',
+  '[ -n "$d" ] && PATH="$d:$PATH";',
+  'command -v npx >/dev/null 2>&1 || { p=$("${SHELL:-/bin/zsh}" -ilc "command -v npx" 2>/dev/null | tail -1); [ -n "$p" ] && PATH="$(dirname "$p"):$PATH"; };',
+  "",
+].join(" ");
+
 // Starts hum's server, detached. hum only opens its own tab when it has a terminal, so
 // HUM_NO_OPEN is set and Hush opens the visible player itself once the server answers.
 async function startHum($) {
@@ -398,7 +410,7 @@ async function startHum($) {
       [
         "/bin/sh",
         "-c",
-        'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"; HUM_NO_OPEN=1 PORT="$1" nohup npx -y -p "$2" hum >/dev/null 2>&1 &',
+        FIND_NODE + 'HUM_NO_OPEN=1 PORT="$1" nohup npx -y -p "$2" hum >/dev/null 2>&1 &',
         "sh",
         String(humPort),
         HUM_INSTALL,
