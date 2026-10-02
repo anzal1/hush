@@ -1,0 +1,8 @@
+{
+  "name": "hush",
+  "version": "0.1.0",
+  "description": "Free internet radio in one quiet line above the prompt. The music steps down when Claude asks you a question. No account, no setup. macOS.",
+  "author": { "name": "Anzal" },
+  "license": "MIT",
+  "keywords": ["music", "radio", "mod", "focus"]
+}

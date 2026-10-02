@@ -1,0 +1,16 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./build.sh
+      - run: cp bin/hush hush-macos
+      - run: gh release upload "$GITHUB_REF_NAME" hush-macos --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

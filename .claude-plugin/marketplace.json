@@ -1,0 +1,22 @@
+{
+  "name": "hush",
+  "owner": {
+    "name": "Anzal"
+  },
+  "plugins": [
+    {
+      "name": "hush",
+      "source": "./",
+      "description": "Free internet radio above the prompt that steps down when Claude asks you a question.",
+      "category": "productivity",
+      "tags": [
+        "music",
+        "radio",
+        "mod"
+      ]
+    }
+  ],
+  "metadata": {
+    "description": "Hush: free internet radio above the Claude Code prompt that steps down when Claude asks you a question."
+  }
+}

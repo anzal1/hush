@@ -1,0 +1,4 @@
+{
+  "description": "Hush: free radio above the prompt, ducks when Claude asks you a question",
+  "modules": ["./register.mjs"]
+}
