@@ -46,6 +46,9 @@ async function boot($: any, on: any) {
   on('env.get', () => ({ value: '/home/test' }))
   on('command.register', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: '/work' }))
+  on('classic.PermissionRequest', () => ({}))
+  on('classic.PostToolUse', () => ({}))
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
   const clock = mock.clock(on)
   const helper = fakeHelper(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -72,8 +75,6 @@ test('/music next moves to the following station and wraps', async ($, on) => {
 
 test('the music ducks on a permission question and returns after the answer', async ($, on) => {
   const { helper } = await boot($, on)
-  on('classic.PermissionRequest', () => ({}))
-  on('classic.PostToolUse', () => ({}))
   await $.command.run({ command: 'music', args: 'jazz' })
   await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm publish' } })
   expect(helper.ducked).toBe(true)
@@ -83,8 +84,6 @@ test('the music ducks on a permission question and returns after the answer', as
 
 test('nothing is drawn while nothing plays, and no helper call is made for a duck', async ($, on) => {
   const { helper } = await boot($, on)
-  on('classic.PermissionRequest', () => ({}))
-  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
   await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: {} })
   expect(helper.sent.some((c: string) => c.startsWith('duck'))).toBe(false)
   const ui = await $.ui.mount(PROMPT(100))
@@ -93,7 +92,6 @@ test('nothing is drawn while nothing plays, and no helper call is made for a duc
 
 test('the band shows the title, station tag and a volume line', async ($, on) => {
   await boot($, on)
-  on('ui.render', () => ({ type: 'Text', props: {}, children: [''] }))
   await $.command.run({ command: 'music', args: 'lofi' })
   const ui = await $.ui.mount(PROMPT(100))
   expect(await ui.find({ type: 'Text', text: /Nights - Frank Ocean/ })).toBeDefined()
@@ -103,9 +101,8 @@ test('the band shows the title, station tag and a volume line', async ($, on) =>
 
 test('the band narrows: volume line goes first, then the tag', async ($, on) => {
   await boot($, on)
-  on('ui.render', () => ({ type: 'Text', props: {}, children: [''] }))
   await $.command.run({ command: 'music', args: 'lofi' })
-  const mid = await $.ui.mount(PROMPT(50))
+  const mid = await $.ui.mount(PROMPT(62))
   expect(await mid.find({ type: 'Text', text: /━/ })).toBeUndefined()
   expect(await mid.find({ type: 'Text', text: /lofi · live/ })).toBeDefined()
   const tight = await $.ui.mount(PROMPT(34))
@@ -115,7 +112,6 @@ test('the band narrows: volume line goes first, then the tag', async ($, on) => 
 
 test('pressing play pauses, and the button then reads play', async ($, on) => {
   const { helper } = await boot($, on)
-  on('ui.render', () => ({ type: 'Text', props: {}, children: [''] }))
   await $.command.run({ command: 'music', args: 'lofi' })
   const ui = await $.ui.mount(PROMPT(100))
   await ui.press({ key: 'play' })
