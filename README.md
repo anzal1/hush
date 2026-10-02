@@ -1,5 +1,7 @@
 # Hush
 
+![Hush playing lofi above the Claude Code prompt](docs/band.png)
+
 Free internet radio and any song, in one quiet line above the Claude Code prompt, with a small DJ Clawd who listens along. When Claude asks you a
 question the music steps down, and it comes back when you answer.
 
@@ -17,6 +19,8 @@ question the music steps down, and it comes back when you answer.
     /music clawd                  show or hide DJ Clawd
 
 Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station, `j` `k` volume, `esc` back.
+
+![The focused band, with controls](docs/band-focused.png)
 
 ## Install
 
@@ -58,3 +62,13 @@ stations do not use it. Use songs at your own discretion, for personal listening
 A tiny headphone-wearing Clawd sits at the right of the row while music plays. He walks in when a song
 starts, nods on tool calls, and lifts one headphone cup when Claude asks you a question (the music steps
 down at the same moment). He needs about 84 columns, and `/music clawd` turns him off.
+
+## Updating
+
+Plugins from a GitHub marketplace do not auto-update by default. Turn it on in `/plugin`, on the
+**Marketplaces** tab, with **Enable auto-update** on `hush`. Or update by hand:
+
+    claude plugin update hush@hush
+
+then run `/reload-plugins` or restart. Mods need Claude Code 2.1.287 or later; update that with
+`claude update`.
