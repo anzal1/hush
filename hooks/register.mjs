@@ -12,21 +12,21 @@
 //   /music lofi | jazz | chill | classical | nature | radio
 //   /music vol 40
 //   /music clawd               show or hide DJ Clawd
-//   /music big                 toggle the big panel (cover, aurora, lyric line) for songs
+//   /music big                 switch between the big panel (the default) and the one-line band for songs
 //
 // When Claude asks a permission question the music steps down and Clawd lifts one
 // headphone cup. Both come back when the question is answered. The host reads
 // on(...) and $.noun.method(...) from source, so they are written out in full.
 //
-// The big panel (hooks/panel.mjs holds its pure parts) draws the cover, an aurora in the
-// cover's colours, the title, artist, lyric line, progress and buttons while a song plays
-// through hum. The terminal gets cells and a picture where it can show one, the desktop a
-// single SVG. Radio keeps the one-line band.
+// The big panel is on by default. It draws the cover, the title, artist, lyric line,
+// progress and buttons while a song plays through hum. The terminal gets cells and an aurora
+// (hooks/panel.mjs holds its pure parts) and a picture where it can show one. The desktop gets
+// one SVG, the stage (hooks/stage.mjs), that moves by itself. Radio keeps the one-line band.
 
+import { stageSvg, STAGE_HEIGHT } from "./stage.mjs";
 import { clamp, duckCommand, humView, livePosition, parseArgs, route, VOLUME_STEP } from "./logic.mjs";
 import {
   auroraCells,
-  BACKGROUND_HEX,
   BONE,
   BONE_DIM,
   BONE_SOFT,
@@ -51,7 +51,6 @@ import {
   PANEL_PAD,
   palette,
   panelGeometry,
-  panelSvg,
   parseBmp,
   pillColor,
   placeholderCells,
@@ -111,7 +110,7 @@ let timerMs = 0;
 let failures = 0;
 let isLit = false;
 let clawdOn = true;
-let big = false;
+let big = true; // the panel is the default; /music big toggles the quiet band
 let canImages = false;
 let cover = emptyCover("");
 let panelSite = null;
@@ -262,6 +261,7 @@ export function register(on) {
   });
 
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    lastSurface = e.surface;
     if (e.props.hasSurvey || !isActive()) {
       leavePanel($, e);
       return next(e);
@@ -563,7 +563,11 @@ async function pollHum($) {
     }
     wantCover($);
     syncAurora($);
-    const seen = [view.name, view.line, view.next, view.album, view.upNext, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
+    // the desktop picture carries the lyric and the time itself; a redraw there only for what it cannot know
+    const seen =
+      lastSurface === "desktop" && big
+        ? [view.name, view.album, view.upNext, view.state, view.ducked, view.volume, view.hasLyrics, cover.key, Boolean(cover.jpg)].join("|")
+        : [view.name, view.line, view.next, view.album, view.upNext, view.state, view.ducked, view.volume, Math.floor(view.pos)].join("|");
     if (seen !== humSeen) {
       humSeen = seen;
       $.ui.invalidate("ui.render");
@@ -1078,6 +1082,9 @@ function stopAurora() {
 // the next second and a bit, the tree is drawn again then.
 function scheduleLine($, view) {
   stopLine();
+  if (lastSurface === "desktop" && big) {
+    return;
+  }
   if (view.state !== "playing" || typeof view.nextIn !== "number" || view.nextIn > 1.4) {
     return;
   }
@@ -1256,6 +1263,21 @@ function captionRows(ui, song, cells, accent, quiet) {
   return [row(c.first), row(c.second)];
 }
 
+// The title, and at the right end the close control: a plain cross that stops the music, the
+// same job as the desktop's close button. Its hotkey is drawn only while the band is focused.
+function titleRow($, ui, song, cells, quiet) {
+  const { Box, Text, Button } = ui;
+  const room = Math.max(4, cells - (isLit ? 6 : 4));
+  return Box({
+    flexDirection: "row",
+    children: [
+      Text({ bold: true, color: BONE, dimColor: quiet, wrap: "truncate-end", children: fit(song.title, room) }),
+      Box({ flexGrow: 1, children: Text({ children: " " }) }),
+      Button({ key: "close", label: "✕", ...keyed("x"), plain: true, dimColor: !isLit, onPress: () => void press($, "stop") }),
+    ],
+  });
+}
+
 // Artist, and the album after it in a dimmer colour when it fits.
 function identityRow(ui, song, cells, quiet) {
   const { Box, Text } = ui;
@@ -1300,7 +1322,7 @@ function terminalPanel($, ui, e, layout, song, columns) {
     flexShrink: 0,
     children: [
       Raster({ key: "aurora", columns: geo.text, rows: geo.ribbon, cells: glow }),
-      Text({ bold: true, color: BONE, dimColor: quiet, wrap: "truncate-end", children: song.title }),
+      titleRow($, ui, song, geo.text, quiet),
       identityRow(ui, song, geo.text, quiet),
       ...(geo.gapA ? [Text({ children: " " })] : []),
       first,
@@ -1324,54 +1346,65 @@ function terminalPanel($, ui, e, layout, song, columns) {
   });
 }
 
-// Desktop: one Svg with the cover on a haze of its own colours, with the title, artist and
-// album. It holds nothing that changes each second, so its source stays the same while the
-// song plays and the animation is not restarted. The lyric lines (or album and what is up
-// next), progress and buttons are native elements under it.
+// The desktop player: one picture that carries the song's next minutes and moves by itself,
+// built from the current position whenever the band is redrawn, and native controls below.
+// On the desktop the band is redrawn only when something visible changes (see pollHum), plus
+// once every two minutes to carry the timeline on.
+let stage = { refresh: false };
+let lastSurface = "";
+
 function desktopPanel($, ui, song, columns) {
-  const { Box, Text, Svg } = ui;
+  const { Box, Text, Button } = ui;
   const ducked = isDucked();
-  const quiet = ducked || song.state === "paused";
-  const accent = hex(cover.accent);
-  const tint = look(quiet);
-  const picture = Svg({
-    source: panelSvg({
-      title: song.title,
-      artist: song.artist,
-      album: song.album,
-      colors: cover.colors,
-      accent: cover.accent,
-      jpeg: cover.jpg,
-      animated: song.state === "playing" && !ducked,
-      dim: quiet,
-    }),
-    alt: song.artist ? `${song.title} by ${song.artist}` : song.title,
-    isInteractive: true,
+  const playing = song.state === "playing";
+  const all = Array.isArray(hum?.lyrics) ? hum.lyrics : [];
+  const source = stageSvg({
+    title: song.title,
+    artist: song.artist,
+    album: song.album,
+    upNext: song.upNext,
+    lyrics: all.map((l) => ({ t: l.t, text: l.text || "" })),
+    pos: song.pos,
+    dur: song.dur,
+    playing,
+    ducked,
+    colors: cover.colors,
+    accent: cover.accent,
+    jpeg: cover.jpg,
+    clawd: clawdOn,
+    clock: Date.now() / 1000,
   });
-  const cells = Math.max(24, Math.min(64, columns - 8));
-  const [first, second] = captionRows(ui, song, cells, accent, quiet);
-  return Box({
-    flexDirection: "column",
-    backgroundColor: BACKGROUND_HEX,
+  if (playing && !stage.refresh) {
+    stage.refresh = true;
+    $.clock.after(120000, () => {
+      stage.refresh = false;
+      $.ui.invalidate("ui.render");
+    });
+  }
+  const picture = ui.Svg({ source, alt: song.artist ? `${song.title} by ${song.artist}` : song.title, height: STAGE_HEIGHT });
+  const glyph = (c) => `${c}\uFE0E`;
+  const controls = Box({
+    flexDirection: "row",
+    alignItems: "center",
+    paddingX: 2,
+    paddingTop: 1,
     paddingBottom: 1,
     children: [
-      picture,
-      Box({
-        flexDirection: "column",
-        paddingX: 2,
-        paddingTop: 1,
-        children: [
-          first,
-          second,
-          Text({ children: " " }),
-          progressRow(ui, song, cells, tint, quiet),
-          Text({ children: " " }),
-          controlsRow($, ui, song, columns, cells, tint),
-          ...(isLit ? [hintRow(ui)] : []),
-        ],
-      }),
+      Button({ key: "prev", label: glyph("\u23EE"), variant: "secondary", ...keyed("h"), onPress: () => void press($, "prev") }),
+      Text({ children: "  " }),
+      Button({ key: "play", label: playing ? glyph("\u23F8") : glyph("\u25B6"), variant: "primary", ...keyed("p"), autoFocus: true, onPress: () => void press($, "pause") }),
+      Text({ children: "  " }),
+      Button({ key: "next", label: glyph("\u23ED"), variant: "secondary", ...keyed("l"), onPress: () => void press($, "next") }),
+      Box({ flexGrow: 1, children: Text({ children: " " }) }),
+      Button({ key: "down", label: glyph("\u2212"), plain: true, dimColor: true, ...(isLit ? { hotkey: "j" } : {}), onPress: () => void press($, "down") }),
+      Text({ color: BONE_DIM, children: ` ${song.volume}% ` }),
+      Button({ key: "up", label: "+", plain: true, dimColor: true, ...(isLit ? { hotkey: "k" } : {}), onPress: () => void press($, "up") }),
+      Text({ children: "   " }),
+      // the desktop draws this as its own close control: it stops the music and the player goes
+      Button({ key: "close", label: "Stop the music", role: "dismiss", ...(isLit ? { hotkey: "x" } : {}), onPress: () => void press($, "stop") }),
     ],
   });
+  return Box({ flexDirection: "column", backgroundColor: "#131315", children: [picture, controls, ...(isLit ? [hintRow(ui)] : [])] });
 }
 
 async function press($, what) {
@@ -1381,6 +1414,7 @@ async function press($, what) {
     prev: { kind: "prev" },
     up: { kind: "vol", delta: VOLUME_STEP },
     down: { kind: "vol", delta: -VOLUME_STEP },
+    stop: { kind: "stop" },
   };
   if (keys[what]) {
     await perform($, keys[what]);

@@ -18,7 +18,7 @@ question the music steps down, and it comes back when you answer.
     /music frank ocean nights     play any song or artist, through hum
     /music jazz                   back to the radio (also /music radio)
     /music clawd                  show or hide DJ Clawd
-    /music big                    toggle the big panel for songs (see Big mode)
+    /music big                    switch between the player (the default) and the quiet one-line band
 
 Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station (previous and next song while a song plays),
 `j` `k` volume, `esc` back.
@@ -27,7 +27,9 @@ Press `ctrl+x tab` to focus the band: `p` pause, `h` `l` station (previous and n
 
 ## Big mode
 
-`/music big` swaps the one-line band for a richer panel while a song plays through hum. Run it again to go back.
+Songs through hum get the full player by default; `/music big` switches to the quiet one-line band and back. The ✕ (or `x` while the band has focus) stops the music.
+
+In the Claude app's Code tab the player is one picture: the cover and its light, the title, the lyric being sung over the next line, a progress bar and the time, and DJ Clawd working two decks at his booth. It moves by itself, so it is never redrawn while a song plays (no flicker), with native buttons for prev, play/pause, next, volume and close underneath.
 Hush remembers the choice. Radio always keeps its one-line band.
 
 The panel shows the cover, a ribbon of aurora in the cover's colours, the title, the artist (and album), the lyric being

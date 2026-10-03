@@ -131,32 +131,41 @@ async function boot($: any, on: any, options: { env?: Record<string, string>; sa
 
 const music = ($: any, args: string) => $.command.run({ command: 'music', args })
 
-// A song playing in the big panel, with the cover already made.
+// A song playing in the big panel (the default), with the cover already made.
 async function playBig($: any, on: any, clock: any) {
-  await music($, 'big')
   await music($, 'amazing grace judy collins')
   await clock.advance(200)
 }
 
-test('/music big toggles the panel, says so, and remembers the choice', async ($, on) => {
+test('/music big switches to the quiet band and back, says so, and remembers the choice', async ($, on) => {
   const { saved } = await boot($, on)
-  expect((await music($, 'big')).text).toMatch(/^Big panel on/)
-  expect(saved.get('big')).toBe(true)
   expect((await music($, 'big')).text).toMatch(/^Big panel off/)
   expect(saved.get('big')).toBe(false)
+  expect((await music($, 'big')).text).toMatch(/^Big panel on/)
+  expect(saved.get('big')).toBe(true)
 })
 
-test('a new session starts with the choice it had', async ($, on) => {
-  const saved = new Map<string, unknown>([['big', true]])
-  const { clock } = await boot($, on, { saved })
+test('the big panel is the default for a new install', async ($, on) => {
+  const { clock } = await boot($, on)
   await music($, 'amazing grace')
   await clock.advance(200)
   const ui = await $.ui.mount(BAND(100))
   expect(await ui.find({ type: 'Raster', key: 'aurora' })).toBeDefined()
 })
 
-test('without big the band is what it was, and nothing is fetched for a cover', async ($, on) => {
+test('a new session starts with the choice it had', async ($, on) => {
+  const saved = new Map<string, unknown>([['big', false]])
+  const { clock } = await boot($, on, { saved })
+  await music($, 'amazing grace')
+  await clock.advance(200)
+  const ui = await $.ui.mount(BAND(100))
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Amazing Grace/ })).toBeDefined()
+})
+
+test('with big off the band is what it was, and nothing is fetched for a cover', async ($, on) => {
   const { scripts, clock } = await boot($, on)
+  await music($, 'big')
   await music($, 'amazing grace')
   await clock.advance(2000)
   const ui = await $.ui.mount(BAND(100))
@@ -167,7 +176,6 @@ test('without big the band is what it was, and nothing is fetched for a cover', 
 
 test('the radio keeps its band when big is on', async ($, on) => {
   const { clock } = await boot($, on)
-  await music($, 'big')
   await music($, 'lofi')
   await clock.advance(3000)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -195,7 +203,9 @@ test('terminal: cell art cover, aurora strip, text, progress and real buttons', 
   expect(await ui.find({ type: 'Text', text: /0:12/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /3:20/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^█+$/ })).toBeDefined()
-  for (const key of ['prev', 'play', 'next']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+  for (const key of ['prev', 'play', 'next', 'close']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+  // the close control is a plain cross, the same word on both surfaces' hint
+  expect((await ui.find({ type: 'Button', key: 'close' }))?.text).toBe('✕')
   // the one-line band is gone
   expect(await ui.find({ type: 'Text', text: /Amazing Grace ·/ })).toBeUndefined()
 })
@@ -249,12 +259,13 @@ test('terminal: below 60 columns, or with no room, the one-line band is drawn', 
   expect(await just.find({ type: 'Raster', key: 'aurora' })).toBeDefined()
 })
 
-test('desktop: one Svg with the cover and a glow that animates, native lyric, progress and buttons', async ($, on) => {
+test('desktop: one Svg stage with the cover, the lyric, a progress bar and the time inside it, and native buttons below', async ($, on) => {
   const { clock } = await boot($, on)
   await playBig($, on, clock)
   const ui = await $.ui.mount(BAND(100, 'desktop'))
   const svg = await ui.find({ type: 'Svg' })
-  expect(svg?.props.isInteractive).toBe(true)
+  // an image, not an interactive frame, so the cover shows and nothing paints white around it
+  expect(svg?.props.isInteractive).toBeFalsy()
   const source = String(svg?.props.source)
   expect(source.length).toBeLessThanOrEqual(131072)
   expect(source).toContain('data:image/jpeg;base64,JPEGJPEG')
@@ -262,32 +273,45 @@ test('desktop: one Svg with the cover and a glow that animates, native lyric, pr
   expect(source).toContain('Amazing Grace')
   expect(source).toContain('Judy Collins')
   expect(source).toContain('Whales &amp; Nightingales')
+  // the lyric being sung, the next line, and the times are in the picture
+  expect(source).toContain('second line')
+  expect(source).toContain('third line')
+  expect(source).toContain('0:12')
+  expect(source).toContain('3:20')
+  expect(source).toContain('NOW PLAYING')
   expect(svg?.props.alt).toBe('Amazing Grace by Judy Collins')
   expect(await ui.find({ type: 'Raster' })).toBeUndefined()
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /second line/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /third line/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /0:12/ })).toBeDefined()
-  for (const key of ['prev', 'play', 'next']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+  // nothing the picture draws is also a native element
+  expect(await ui.find({ type: 'Text', text: /second line/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /3:20/ })).toBeUndefined()
+  for (const key of ['prev', 'play', 'next', 'down', 'up', 'close']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /80%/ })).toBeDefined()
 })
 
-test('desktop: the Svg source stays the same while the song plays, so its animation is not restarted', async ($, on) => {
-  const { clock, hum } = await boot($, on)
+test('desktop: the media buttons are glyphs, play is the primary one, and close is a dismiss role', async ($, on) => {
+  const { clock } = await boot($, on)
   await playBig($, on, clock)
   const ui = await $.ui.mount(BAND(100, 'desktop'))
-  const before = String((await ui.find({ type: 'Svg' }))?.props.source)
-  hum.position = 25
-  await clock.advance(3000)
-  expect(await ui.find({ type: 'Text', text: /third line/ })).toBeDefined()
-  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toBe(before)
+  const label = async (key: string) => (await ui.find({ type: 'Button', key }))?.props
+  expect((await label('prev'))?.label).toBe('\u23EE\uFE0E')
+  expect((await label('next'))?.label).toBe('\u23ED\uFE0E')
+  expect((await label('play'))?.label).toBe('\u23F8\uFE0E')
+  expect((await label('play'))?.variant).toBe('primary')
+  expect((await label('prev'))?.variant).toBe('secondary')
+  expect((await label('close'))?.role).toBe('dismiss')
+  await ui.press({ key: 'play' })
+  expect((await label('play'))?.label).toBe('\u25B6\uFE0E')
 })
 
-test('desktop: pausing swaps in a still glow', async ($, on) => {
+test('desktop: pausing swaps in a still stage', async ($, on) => {
   const { clock } = await boot($, on)
   await playBig($, on, clock)
   const ui = await $.ui.mount(BAND(100, 'desktop'))
   await ui.press({ key: 'play' })
-  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).not.toContain('<animate ')
+  const paused = String((await ui.find({ type: 'Svg' }))?.props.source)
+  expect(paused).not.toContain('<animate ')
+  expect(paused).toContain('PAUSED')
   await ui.press({ key: 'play' })
   expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain('<animate ')
 })
@@ -430,17 +454,17 @@ test('no blits are made on the desktop, which has no Raster', async ($, on) => {
   expect(blits).toHaveLength(0)
 })
 
-test('DJ Clawd stays in big mode, on the controls row, and /music clawd still hides him', async ($, on) => {
+test('DJ Clawd stays in big mode (on the terminal controls row, at the booth on the desktop), and /music clawd still hides him', async ($, on) => {
   const { clock } = await boot($, on)
   await playBig($, on, clock)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount(BAND(100, surface))
-    expect(await ui.find({ type: 'Text', text: /\(▐[▛▙]█[▜▟]▌\)/ })).toBeDefined()
-    await ui.unmount()
-  }
+  const term = await $.ui.mount(BAND(100))
+  expect(await term.find({ type: 'Text', text: /\(▐[▛▙]█[▜▟]▌\)/ })).toBeDefined()
+  const desk = await $.ui.mount(BAND(100, 'desktop'))
+  expect(String((await desk.find({ type: 'Svg' }))?.props.source)).toContain('>hum</text>')
   await music($, 'clawd')
-  const hidden = await $.ui.mount(BAND(100))
-  expect(await hidden.find({ type: 'Text', text: /▐/ })).toBeUndefined()
+  await clock.advance(100)
+  expect(await term.find({ type: 'Text', text: /▐/ })).toBeUndefined()
+  expect(String((await desk.find({ type: 'Svg' }))?.props.source)).not.toContain('>hum</text>')
 })
 
 test('when Claude asks a question the panel dims and Clawd lifts a cup', async ($, on) => {
@@ -518,12 +542,17 @@ test('terminal: a song without lyrics shows its album and what is up next, never
   expect(await ui.find({ type: 'Text', text: 'up next  ' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Nights · Frank Ocean' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /second line/ })).toBeUndefined()
+  // the desktop stage says the same inside its picture
+  const desk = await $.ui.mount(BAND(100, 'desktop'))
+  const source = String((await desk.find({ type: 'Svg' }))?.props.source)
+  expect(source).toContain('Whales &amp; Nightingales')
+  expect(source).toContain('Nights · Frank Ocean')
+  expect(source).not.toContain('second line')
+  await desk.unmount()
   // and with no queue either, the second row still says something
   hum.upNext = []
   await clock.advance(1500)
   expect(await ui.find({ type: 'Text', text: /no synced lyrics/ })).toBeDefined()
-  const desk = await $.ui.mount(BAND(100, 'desktop'))
-  expect(await desk.find({ type: 'Text', text: 'Whales & Nightingales' })).toBeDefined()
 })
 
 test('terminal: the panel is as tall as the room allows, 8 to 10 rows, with a square cover', async ($, on) => {
